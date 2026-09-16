@@ -99,7 +99,7 @@ Then remove the `alias dex=…` line from `~/.zshrc`, and the Dex entry in Syste
 ./build.sh                      # needs Xcode Command Line Tools → build/Dex.app + build/Dex.zip
 swift tools/make-icon.swift     # only if you change the app icon / GitHub icon
 ```
-Build notes and reusable tool guides: [`buildlog/`](buildlog/).
+Build notes: [`buildlog/`](buildlog/).
 
 ## Support
 

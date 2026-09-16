@@ -1,6 +1,8 @@
 # Dex build log
 
-Rolling log. Newest session at the bottom. Reusable tool notes live in [`newskills/`](newskills/).
+Rolling log. Newest session at the bottom.
+
+> **Skills moved (2026-09-16):** the reusable tool notes that used to be in `buildlog/newskills/` now live in the **gigacook toolkit** (`~/Documents/Claude/gigacook-toolkit/skills/`), renamed with a `tool-` prefix (e.g. `newskills/swiftc` → `tool-swiftc`). Older mentions of `newskills/…` below refer to those.
 
 ## Session 1: 2026-09-16, v1.0.0
 
