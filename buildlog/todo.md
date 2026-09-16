@@ -11,13 +11,15 @@
 - [ ] Install for real: `curl -fsSL https://raw.githubusercontent.com/gigacook/dex/main/install.sh | sh`
 - [ ] Delete the test build: `rm -rf ~/Documents/Claude/sandBox/17_dex/build`. It registered itself as a login item from that folder.
 - [ ] System Settings → General → Login Items: only **one** Dex listed, and it points to /Applications
-- [ ] **Your ⌃⌥D:** Magnet → Settings → Keyboard shortcuts → clear "Left Third" (and "Top Third"). Then Dex menu → Hot Key → press ⌃⌥D
-- [ ] Hotkey (⌃⌥⌘D, or ⌃⌥D after the step above) → heat warning → password prompt → icon turns green, menu shows `DEX — ACTIVE`
+- [ ] **Deny both Ghostty prompts** (Screen Recording + System Events). They came from Claude's screenshot attempt, not Dex. If you clicked Allow: System Settings → Privacy & Security → Screen & System Audio Recording / Automation → turn Ghostty off
+- [ ] Dex start → dialog "⌃⌥D is also used by Magnet (Left Third, Top Third)" → **Unbind in Magnet** → Magnet restarts → ⌃⌥D no longer resizes windows. Backup lands in `~/Library/Application Support/Dex/`
+- [ ] ⌃⌥D → heat warning → password prompt → icon turns green, menu shows `DEX — ACTIVE`
 - [ ] **Look at the new menu** (JetBrains Mono, row spacing, GitHub icon, coffee icon). Screenshot it (⌘⇧4) and send it to Claude if anything looks off
 - [ ] Close the lid for 5+ min on battery with something running (e.g. `ping 1.1.1.1`) → reopen → still running
 - [ ] Hover **Auto-Disable** → tooltip. Untick → warning with "Don't warn me again"
 - [ ] Click `≥80°C` → set 45 while active → Dex turns itself off within 30 s ("the chip is at …°C"). Set back to 80
-- [ ] Hot Key → try ⌘Space (warns "used by macOS"). Try ⌃⌥D before clearing it in Magnet (warns "used by Magnet")
+- [ ] Hot Key → try ⌘Space → dialog "used by macOS" with Use Anyway / Pick Another
+- [ ] Hot Key → try ⌃⌥F (Magnet Center Third) → **Pick Another** → picker opens again → Esc keeps ⌃⌥D
 - [ ] Quit Dex → `pmset -g | grep SleepDisabled` shows `0`
 - [ ] New terminal → `dex` starts it. Spotlight → "Dex" finds it (with the green icon).
 

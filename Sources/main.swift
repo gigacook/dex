@@ -102,30 +102,113 @@ func carbonMods(_ f: NSEvent.ModifierFlags) -> UInt32 {
         | (f.contains(.option) ? UInt32(optionKey) : 0) | (f.contains(.shift) ? UInt32(shiftKey) : 0)
 }
 
-/// Who already uses this shortcut: macOS, or a window manager that Carbon can't see (Magnet, Rectangle).
-func shortcutOwner(_ code: UInt32, _ mods: UInt32) -> String? {
+/// Someone else using a shortcut: macOS, or a window manager Carbon can't see. `unbind` is set when Dex can remove it.
+struct Conflict {
+    let owner: String
+    let actions: [String]
+    let unbind: (() -> Bool)?
+}
+
+/// "command:default.name.leftThird" / "firstThird" → "Left Third"
+func pretty(_ name: String) -> String {
+    let last = name.split(separator: ".").last.map(String.init) ?? name
+    return last.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression).capitalized
+}
+
+let magnetID = "com.crowdcafe.windowmagnet"
+let magnetKeys = ["horizontalCommands", "verticalCommands"]
+
+func magnetCommands(_ key: String) -> [[String: Any]] {
+    guard let data = CFPreferencesCopyAppValue(key as CFString, magnetID as CFString) as? Data else { return [] }
+    return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+}
+
+func magnetUses(_ cmd: [String: Any], _ code: UInt32, _ mods: UInt32) -> Bool {
+    let k = cmd["keyboardShortcut"] as? [String: Any], s = k?["shortcut"] as? [String: Any]
+    return k?["enabled"] as? Bool == true && s?["carbonKeyCode"] as? Int == Int(code) && s?["carbonModifiers"] as? Int == Int(mods)
+}
+
+/// Backs up Magnet's settings, quits Magnet, removes the shortcut from matching commands, relaunches Magnet.
+func unbindMagnet(_ code: UInt32, _ mods: UInt32) -> Bool {
+    let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Dex")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    sh("/usr/bin/defaults export \(magnetID) '\(dir.path)/magnet-backup-\(Int(Date().timeIntervalSince1970)).plist'")
+
+    // Magnet only reads its settings at launch
+    let running = NSRunningApplication.runningApplications(withBundleIdentifier: magnetID)
+    running.forEach { $0.terminate() }
+    var waited = 0
+    while running.contains(where: { !$0.isTerminated }), waited < 50 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        waited += 1
+    }
+
+    for key in magnetKeys {
+        var cmds = magnetCommands(key)
+        guard !cmds.isEmpty else { continue }
+        for i in cmds.indices where magnetUses(cmds[i], code, mods) {
+            var k = cmds[i]["keyboardShortcut"] as? [String: Any] ?? [:]
+            k.removeValue(forKey: "shortcut")
+            cmds[i]["keyboardShortcut"] = k
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: cmds) {
+            CFPreferencesSetAppValue(key as CFString, data as CFData, magnetID as CFString)
+        }
+    }
+    CFPreferencesAppSynchronize(magnetID as CFString)
+
+    if !running.isEmpty, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: magnetID) {
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+    return !magnetKeys.contains { magnetCommands($0).contains { magnetUses($0, code, mods) } }
+}
+
+func conflict(_ code: UInt32, _ mods: UInt32) -> Conflict? {
     var arr: Unmanaged<CFArray>?
     if CopySymbolicHotKeys(&arr) == noErr, let list = arr?.takeRetainedValue() as? [[String: Any]], list.contains(where: {
         ($0["kHISymbolicHotKeyEnabled"] as? Bool ?? false) && ($0["kHISymbolicHotKeyCode"] as? Int) == Int(code)
             && UInt32($0["kHISymbolicHotKeyModifiers"] as? Int ?? 0) & modMask == mods
-    }) { return "macOS" }
+    }) { return Conflict(owner: "macOS", actions: [], unbind: nil) }
 
-    for key in ["horizontalCommands", "verticalCommands"] {
-        guard let data = CFPreferencesCopyAppValue(key as CFString, "com.crowdcafe.windowmagnet" as CFString) as? Data,
-              let cmds = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { continue }
-        if cmds.contains(where: {
-            let k = $0["keyboardShortcut"] as? [String: Any], s = k?["shortcut"] as? [String: Any]
-            return k?["enabled"] as? Bool == true && s?["carbonKeyCode"] as? Int == Int(code) && s?["carbonModifiers"] as? Int == Int(mods)
-        }) { return "Magnet" }
+    let magnet = magnetKeys.flatMap { magnetCommands($0) }.filter { magnetUses($0, code, mods) }
+    if !magnet.isEmpty {
+        let names = magnet.compactMap { $0["name"] as? String }.map(pretty)
+        return Conflict(owner: "Magnet", actions: names, unbind: { unbindMagnet(code, mods) })
     }
 
     let rect = "com.knollsoft.Rectangle" as CFString
     let keys = CFPreferencesCopyKeyList(rect, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? [String] ?? []
-    if keys.contains(where: {
+    let used = keys.filter {
         guard let d = CFPreferencesCopyAppValue($0 as CFString, rect) as? [String: Any], d["keyCode"] as? Int == Int(code) else { return false }
         return carbonMods(NSEvent.ModifierFlags(rawValue: UInt(d["modifierFlags"] as? Int ?? 0))) == mods
-    }) { return "Rectangle" }
-    return nil
+    }
+    return used.isEmpty ? nil : Conflict(owner: "Rectangle", actions: used.map(pretty), unbind: nil)
+}
+
+enum Resolution { case useIt, pickAnother }
+
+/// Explains the clash and lets the user unbind it in the other app, use it anyway, or pick another shortcut.
+func resolve(_ c: Conflict, label: String) -> Resolution {
+    let a = NSAlert()
+    a.messageText = "\(label) is also used by \(c.owner)"
+    let what = c.actions.isEmpty ? "" : "\(c.owner) uses it for: \(c.actions.joined(separator: ", ")).\n"
+    let how = switch c.owner {
+    case "Magnet": "Unbind removes it from those Magnet commands (Magnet restarts, a backup is saved in ~/Library/Application Support/Dex)."
+    case "macOS": "To free it, change it in System Settings → Keyboard → Keyboard Shortcuts."
+    default: "To free it, clear it in \(c.owner)'s settings."
+    }
+    a.informativeText = what + "If both keep it, one key press triggers both.\n\n" + how
+    if c.unbind != nil { a.addButton(withTitle: "Unbind in \(c.owner)") }
+    a.addButton(withTitle: "Use Anyway")
+    a.addButton(withTitle: "Pick Another")
+    NSApp.activate(ignoringOtherApps: true)
+    let r = a.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+    let choice = c.unbind == nil ? r + 1 : r // 0 unbind, 1 use anyway, 2 pick another
+    if choice == 0, let unbind = c.unbind, !unbind() {
+        alert("Couldn't unbind it in \(c.owner)", "Clear it in \(c.owner)'s settings, or pick another shortcut.")
+        return .pickAnother
+    }
+    return choice == 2 ? .pickAnother : .useIt
 }
 
 func label(_ e: NSEvent) -> String {
@@ -247,7 +330,7 @@ final class Dex: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_: Notification) {
         _ = setSleepDisabled(false) // clear any leftover state from a crash
         if SMAppService.mainApp.status != .enabled { try? SMAppService.mainApp.register() }
-        defaults.register(defaults: ["code": 2, "mods": Int(cmdKey | controlKey | optionKey), "label": "⌃⌥⌘D",
+        defaults.register(defaults: ["code": 2, "mods": Int(controlKey | optionKey), "label": "⌃⌥D",
                                      "safeMode": true, "batteryMin": 15, "tempMax": 80])
 
         let safeTip = "Auto-Disable turns Dex off by itself when the chip gets too hot, or when the Mac is on battery "
@@ -288,12 +371,18 @@ final class Dex: NSObject, NSApplicationDelegate {
         InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in onHotKey(); return noErr }, 1, &spec, nil, nil)
         let code = UInt32(defaults.integer(forKey: "code")), mods = UInt32(defaults.integer(forKey: "mods"))
         let label = defaults.string(forKey: "label")!
-        if !registerHotKey(code, mods) {
-            alert("Hotkey \(label) isn't working", "Another app has it. Open the Dex menu to pick a new one.")
-        } else if let owner = shortcutOwner(code, mods) {
-            alert("\(owner) also uses \(label)", "Both will react when you press it. Change it in \(owner), or pick a new one in the Dex menu.")
-        }
         refresh()
+        if !registerHotKey(code, mods) {
+            alert("Hotkey \(label) isn't working", "Another app has it. Pick a new one.")
+            changeHotKey()
+        } else if let c = conflict(code, mods), !defaults.bool(forKey: "allowed-\(code)-\(mods)") {
+            if resolve(c, label: label) == .pickAnother { changeHotKey() } else { rememberAllowed(code, mods) }
+        }
+    }
+
+    /// After "Use Anyway": don't ask about this clash again at every launch.
+    func rememberAllowed(_ code: UInt32, _ mods: UInt32) {
+        if conflict(code, mods) != nil { defaults.set(true, forKey: "allowed-\(code)-\(mods)") }
     }
 
     func applicationWillTerminate(_: Notification) { _ = setSleepDisabled(false) }
@@ -410,16 +499,14 @@ final class Dex: NSObject, NSApplicationDelegate {
         if let monitor { NSEvent.removeMonitor(monitor) }
         guard let p = picked else { return }
 
-        let oldCode = UInt32(defaults.integer(forKey: "code")), oldMods = UInt32(defaults.integer(forKey: "mods"))
-        var problem: String?
-        if let owner = shortcutOwner(p.code, p.mods) {
-            problem = "\(p.label) is used by \(owner)."
-        } else if !registerHotKey(p.code, p.mods) {
-            problem = "\(p.label) is already taken by another app."
+        if let c = conflict(p.code, p.mods) {
+            guard resolve(c, label: p.label) == .useIt else { return changeHotKey() }
+            rememberAllowed(p.code, p.mods)
         }
-        if let problem {
-            _ = registerHotKey(oldCode, oldMods)
-            return alert(problem, "Keeping \(defaults.string(forKey: "label")!). Pick a different one.")
+        guard registerHotKey(p.code, p.mods) else {
+            _ = registerHotKey(UInt32(defaults.integer(forKey: "code")), UInt32(defaults.integer(forKey: "mods")))
+            alert("\(p.label) is already taken by another app.", "Keeping \(defaults.string(forKey: "label")!). Pick a different one.")
+            return changeHotKey()
         }
         defaults.set(Int(p.code), forKey: "code")
         defaults.set(Int(p.mods), forKey: "mods")

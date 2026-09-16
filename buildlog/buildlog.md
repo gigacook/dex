@@ -98,3 +98,28 @@ No Xcode project, no SwiftPM, no dependencies.
 - Hotkey "taken" checks must read the popular window managers' prefs. Carbon alone lies.
 - Don't try to automate status-menu screenshots with osascript. Ask the user for a screenshot.
 - See `newskills/iohid-temperature`, `newskills/bundled-fonts`, and the updated `carbon-hotkeys` + `nsstatusitem`.
+
+## Session 4: 2026-09-16, v1.2.0 (cont.)
+
+**Goal:** audit skills for gaps. Explain the Ghostty permission prompts. Default back to ⌃⌥D. Conflict warning with Unbind / Use Anyway / Pick Another, showing the colliding app's action names. Magnet unbind done by Dex. README with behavior + limits.
+
+### Timeline
+| Step | What | Result |
+|---|---|---|
+| 1 | User screenshot: Ghostty asked for **Screen Recording** + **Automation → System Events** | Caused by *my* session 3 `screencapture` + `osascript` attempt, not by Dex. Documented in `newskills/macos-permissions` |
+| 2 | Skill audit vs everything used | Missing: `defaults`/`plutil`/CFPreferences (other apps' prefs), `swift` test scripts, TCC prompts, SVG→PNG. Added `app-preferences`, `swift-scripts`, `macos-permissions` + iconutil note |
+| 3 | Inspected Magnet: bundle id, prefs location, "empty shortcut" shape | Plain `~/Library/Preferences` (not sandboxed). Separators store `keyboardShortcut` without a `shortcut` key → safe "unbound" format |
+| 4 | `Conflict {owner, actions, unbind?}` + `resolve()` alert (Unbind / Use Anyway / Pick Another), used at launch + on rebind | "Use Anyway" remembered per combo (`allowed-<code>-<mods>`) |
+| 5 | `unbindMagnet`: backup (`defaults export`) → terminate → edit JSON → `CFPreferencesAppSynchronize` → relaunch → verify | |
+| 6 | **Dry-run** in a swift script (no write) | Hits exactly `Left Third` + `Top Third`, 24/24 commands kept, 1 shortcut removed per list, Bools intact |
+| 7 | README rewritten: behavior tables + "Good to know" limits | |
+
+### Key decisions
+- **Default stays ⌃⌥D** (user preference). Clashes are handled by the dialog instead of avoided.
+- **Rectangle: warn only, no auto-unbind.** Not installed here, so its "cleared" format can't be verified, and a wrong edit could reset its shortcuts to defaults.
+- **macOS clashes: warn + Use Anyway.** Editing `com.apple.symbolichotkeys` needs a logout to apply.
+- Did **not** run the real Magnet unbind myself. It changes the user's Magnet setup, so the user triggers it from the dialog.
+
+### Cost savers for next time
+- Never verify GUI via osascript/screencapture (prompts go to the user's terminal, permanently if allowed).
+- Before editing another app's settings: find an existing "empty" entry and copy its shape, then dry-run.

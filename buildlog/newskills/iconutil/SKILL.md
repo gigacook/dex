@@ -24,3 +24,4 @@ Render one size: `NSBitmapImageRep(pixelsWide:…)` → `NSGraphicsContext(bitma
 - Finder/Spotlight cache icons. After changing one: `touch /Applications/Dex.app` or `killall Dock`.
 - Generate once and commit the `.icns`. Don't regenerate on every build.
 - Spotlight indexes any `.app` in /Applications automatically. No extra setup.
+- **SVG → PNG** (for brand logos like GitHub that aren't SF Symbols): download the SVG (e.g. `cdn.jsdelivr.net/npm/@primer/octicons/build/svg/mark-github-16.svg`), then in the same Swift script `NSImage(contentsOfFile: "x.svg")` → draw into an `NSBitmapImageRep` → PNG. SVG loading needs macOS 14+ **on the build machine only**. The app ships the PNG, so older Macs are fine.

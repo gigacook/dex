@@ -6,14 +6,6 @@ One icon, one hotkey, safe defaults.
 
 > *Malo periculosam libertatem quam quietum servitium*
 
-## Features
-- **Lid-closed keep-awake:** no charger or external monitor needed
-- **Icon shows state:** thin ring = idle, **green and thicker = keeping awake**
-- **Global hotkey** (default **⌃⌥⌘D**). Change it from the menu. Dex warns you if macOS, Magnet or Rectangle already uses it.
-- **Auto-Disable** (on by default): Dex switches itself off when the chip reaches **80°C** or the battery (unplugged) drops to **15%**. Click either value in the menu to change it. A closed laptop in a bag won't cook or drain flat.
-- **Starts at login.** Also findable in Spotlight and Launchpad.
-- **Open source:** about 400 lines of Swift you can read before trusting it
-
 ## Install
 
 Paste into Terminal:
@@ -22,42 +14,92 @@ Paste into Terminal:
 curl -fsSL https://raw.githubusercontent.com/gigacook/dex/main/install.sh | sh
 ```
 
-This puts Dex in `/Applications`, starts it, and adds a `dex` terminal command.
-
-**The first time you turn it on**, macOS asks for your password once. Dex uses it to add a single rule (`/etc/sudoers.d/dex`) that lets it run exactly one command: `pmset -a disablesleep 0/1`. Nothing else.
-
+This puts Dex in `/Applications`, starts it, sets it to start at login, and adds a `dex` terminal command.
 Requires macOS 13 or later, on Apple Silicon or Intel.
 
-## Use
+## The menu
 
-| | |
-|---|---|
-| Turn on / off | **⌃⌥⌘D** (or your own hotkey), or click `DEX — INACTIVE` in the menu |
-| Menu | Click the menu bar icon |
-| Auto-Disable | Menu → checkbox on/off, click `≤15%` / `≥80°C` to change (hover for details) |
-| Start Dex if it's not running | `dex` in Terminal, `open -a Dex`, or Spotlight → "Dex" |
+```
+DEX — INACTIVE                          click to switch (ACTIVE = green)
+─────────────────────────────────
+☑ Auto-Disable when  [≤15%] [≥80°C]     click a value to change it
+Hot Key: ⌃⌥D  (click to change)
+─────────────────────────────────
+by Daniel Trifunovic   [GitHub]  ☕ Support Dex
+─────────────────────────────────
+Quit Dex
+```
 
-Quitting Dex always restores normal sleep.
+Menu bar icon: **thin ring + bolt = inactive**, **thicker green = keeping your Mac awake**.
 
-### Why not ⌃⌥D?
-Magnet and Rectangle (popular window managers) use ⌃⌥D for "left third" by default. If you don't use that, remove it in their settings and pick ⌃⌥D in Dex.
+## How it behaves
 
-### Temperature on Intel Macs
-Intel Macs don't expose chip temperature the same way. There Dex uses macOS's own "too hot" signal instead of the °C value.
+### Turning it on / off
+- Press **⌃⌥D** (or your own hotkey), or click `DEX — INACTIVE` in the menu.
+- **The first time:** a heat warning ("don't leave it closed in a bag"), with "Don't warn me again".
+- **The first time only:** macOS asks for your password. Dex uses it to add one rule, `/etc/sudoers.d/dex`, that lets it run exactly `pmset -a disablesleep 0` and `1`, nothing else. After that, switching is instant with no password.
+- **Quitting Dex, restarting the Mac, or Dex crashing** always ends with normal sleep. Dex resets it at launch and at quit.
+
+### Auto-Disable (on by default)
+Dex switches itself **off** and tells you why when:
+- the **chip temperature** reaches **80°C**, or
+- the Mac is **on battery** and drops to **15%**.
+
+It checks every 30 seconds while active, and won't turn on if either is already true.
+- **Change the values:** click `≤15%` (5–90) or `≥80°C` (50–105). Hover the row for an explanation.
+- **Turn it off:** untick the checkbox → warning with "Don't warn me again".
+
+### Hotkey and clashing apps
+Default is **⌃⌥D**. Click *Hot Key* and press a new combo (it needs ⌘, ⌃ or ⌥). Esc cancels.
+
+Dex checks whether something else already uses the shortcut, **when it starts and when you pick one**:
+
+| Clashes with | Dex shows | Your choices |
+|---|---|---|
+| **Magnet** | Which Magnet actions use it (e.g. *Left Third, Top Third*) | **Unbind in Magnet** (automatic), **Use Anyway**, **Pick Another** |
+| **Rectangle** | Which Rectangle actions use it | **Use Anyway**, **Pick Another** (clear it in Rectangle yourself) |
+| **macOS** shortcuts | That macOS uses it | **Use Anyway**, **Pick Another** |
+
+**Unbind in Magnet:**
+1. saves a backup to `~/Library/Application Support/Dex/magnet-backup-<time>.plist`
+2. quits Magnet
+3. removes the shortcut from those actions only (everything else untouched)
+4. reopens Magnet
+
+To restore: `defaults import com.crowdcafe.windowmagnet ~/Library/Application\ Support/Dex/magnet-backup-<time>.plist`, then restart Magnet.
+
+**Use Anyway** is remembered for that combo, so Dex won't ask again at every launch. Both apps then react to the key press.
+
+### If Dex isn't running
+`dex` in Terminal, `open -a Dex`, or Spotlight → "Dex". Opening it again never starts a second copy.
+
+## Good to know (how it works and its limits)
+
+- **Why a password?** Keeping a Mac awake *with the lid closed* is only possible with `pmset disablesleep`, which needs admin rights. The usual tools (`caffeinate`, Amphetamine-style "assertions") don't stop lid-close sleep without a charger and external display.
+- **80°C will trip under heavy work.** Apple Silicon chips normally run 90–100°C when busy. For a closed laptop in a bag that's the point. If you run long heavy jobs **with the lid open**, raise the limit.
+- **Temperature reading uses an undocumented macOS interface** (the same one monitoring apps like Stats use). It needs no permissions, but a future macOS update could break it. If it stops working, Dex falls back to macOS's own "too hot" signal.
+- **Intel Macs** don't expose chip temperature this way, so they always use that "too hot" signal instead of the °C value.
+- **Hotkey detection has limits.** macOS lets two apps register the same shortcut without error, so Dex specifically reads **Magnet's** and **Rectangle's** settings. Clashes with other apps (Raycast, BetterTouchTool, Karabiner rules, in-app shortcuts) are **not** detected.
+- **The Magnet unbind edits Magnet's settings file** in a format Magnet doesn't document. It was built against Magnet's current settings format. If a Magnet update changes it, Dex tells you it couldn't unbind, and the backup is always saved first.
+- **Unsigned app.** Dex isn't signed with a paid Apple Developer ID. The curl installer avoids Gatekeeper's block. If you download the zip in a browser instead, right-click → Open the first time.
+- **No privacy permissions.** Dex needs no Accessibility, Screen Recording or Automation access. If you see such a prompt, it isn't from Dex.
+- **Not possible on the Mac App Store.** App Store apps can't change system sleep settings or read chip sensors.
 
 ## Uninstall
 
 ```sh
 pkill -x Dex; rm -rf /Applications/Dex.app; sudo rm /etc/sudoers.d/dex
+rm -rf ~/Library/Application\ Support/Dex; defaults delete com.gigacook.dex
 ```
-Then remove the `alias dex=…` line from `~/.zshrc`.
+Then remove the `alias dex=…` line from `~/.zshrc`, and the Dex entry in System Settings → General → Login Items if it's still listed.
 
 ## Build from source
 
 ```sh
-./build.sh                      # needs Xcode Command Line Tools → build/Dex.app
-swift tools/make-icon.swift     # only if you change the app icon
+./build.sh                      # needs Xcode Command Line Tools → build/Dex.app + build/Dex.zip
+swift tools/make-icon.swift     # only if you change the app icon / GitHub icon
 ```
+Build notes and reusable tool guides: [`buildlog/`](buildlog/).
 
 ## Support
 
