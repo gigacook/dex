@@ -70,3 +70,31 @@ No Xcode project, no SwiftPM, no dependencies.
 - Menu item tooltip + checkmark = `item.toolTip` + `item.state`. Don't build a custom NSView.
 - One `confirm()` helper with a UserDefaults mute key covers every "warn once" dialog.
 - See `newskills/iokit-power` and `newskills/iconutil`.
+
+## Session 3: 2026-09-16, v1.2.0
+
+**Goal:** figure out why ⌃⌥D resizes windows. JetBrains Mono menu redesign (`DEX — STATE` / Auto-Disable with `≤15%` `≥80°C` editable / Hot Key / author + GitHub + coffee). Real °C temperature.
+
+### Timeline
+| Step | What | Result |
+|---|---|---|
+| 1 | `ps` + `/Applications` scan for window managers | **Magnet** + Karabiner running |
+| 2 | Decoded Magnet prefs (`defaults export` → `plutil -extract … raw` → base64 → JSON) | Magnet "Left Third" + "Top Third" = keyCode 2, mods 6144 (⌃⌥D) |
+| 3 | Test `RegisterEventHotKey` ⌃⌥D while Magnet runs | **Succeeds** (noErr). Carbon can't see Magnet's binding, so both fire |
+| 4 | Fix: default → ⌃⌥⌘D. `shortcutOwner()` reads Magnet + Rectangle prefs via `CFPreferencesCopyAppValue`. Launch warning on conflict | Verified: ⌃⌥D → Magnet, ⌃⌥⌘D → free |
+| 5 | Private IOHID sensor API test script | M2: `PMU tdie*` sensors ≈ 40°C idle. `tcal` = fake 51.85 constant, skip it |
+| 6 | JetBrains Mono TTF + OFL from jsdelivr → `Resources/`, `ATSApplicationFontsPath = .` | Fonts load from the bundle, no install |
+| 7 | GitHub mark: octicons SVG → PNG via `NSImage(contentsOfFile:)` in `make-icon.swift` | Committed `Resources/github.png` (SVG in build/ only) |
+| 8 | Menu rebuilt: attributed titles + `NSStackView` custom row views | Compiled first try |
+| 9 | Tried `osascript` System Events click on the status item for a screenshot | **Hung 120 s**. A menu click blocks until the menu closes. Killed it. Visual check left to the user |
+
+### Key decisions
+- **Default hotkey ⌃⌥⌘D** (still D). ⌃⌥D collides with Magnet *and* Rectangle defaults. The user can rebind after removing it in Magnet.
+- **Temp = max of `tdie` sensors** (chip die). Intel fallback = `thermalState ≥ .serious`.
+- **Editable values = pill buttons → NSAlert with a text field.** Typing into text fields *inside* an open menu is unreliable.
+- Dropped the date/quote rows per the new layout. The quote lives on as the author row's tooltip.
+
+### Cost savers for next time
+- Hotkey "taken" checks must read the popular window managers' prefs. Carbon alone lies.
+- Don't try to automate status-menu screenshots with osascript. Ask the user for a screenshot.
+- See `newskills/iohid-temperature`, `newskills/bundled-fonts`, and the updated `carbon-hotkeys` + `nsstatusitem`.

@@ -34,3 +34,14 @@ for base in [16, 32, 128, 256, 512] {
     try! render(base).write(to: URL(fileURLWithPath: "\(dir)/icon_\(base)x\(base).png"))
     try! render(base * 2).write(to: URL(fileURLWithPath: "\(dir)/icon_\(base)x\(base)@2x.png"))
 }
+
+// GitHub mark for the menu (from @primer/octicons mark-github-16.svg, saved to build/github.svg)
+if let svg = NSImage(contentsOfFile: "build/github.svg") {
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 32, bitsPerSample: 8,
+                               samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                               bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    svg.draw(in: NSRect(x: 0, y: 0, width: 32, height: 32))
+    NSGraphicsContext.current = nil
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "Resources/github.png"))
+}

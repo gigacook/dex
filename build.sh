@@ -9,7 +9,7 @@ done
 lipo -create build/dex-arm64 build/dex-x86_64 -output build/Dex.app/Contents/MacOS/Dex
 mkdir -p build/Dex.app/Contents/Resources
 cp Info.plist build/Dex.app/Contents/
-cp Resources/AppIcon.icns build/Dex.app/Contents/Resources/
+cp -R Resources/ build/Dex.app/Contents/Resources/
 codesign --force -s - build/Dex.app
 (cd build && ditto -c -k --keepParent Dex.app Dex.zip)
 echo "Built build/Dex.app and build/Dex.zip"

@@ -11,12 +11,17 @@
 - [ ] Install for real: `curl -fsSL https://raw.githubusercontent.com/gigacook/dex/main/install.sh | sh`
 - [ ] Delete the test build: `rm -rf ~/Documents/Claude/sandBox/17_dex/build`. It registered itself as a login item from that folder.
 - [ ] System Settings → General → Login Items: only **one** Dex listed, and it points to /Applications
-- [ ] ⌃⌥D → heat warning → password prompt → icon turns green
+- [ ] **Your ⌃⌥D:** Magnet → Settings → Keyboard shortcuts → clear "Left Third" (and "Top Third"). Then Dex menu → Hot Key → press ⌃⌥D
+- [ ] Hotkey (⌃⌥⌘D, or ⌃⌥D after the step above) → heat warning → password prompt → icon turns green, menu shows `DEX — ACTIVE`
+- [ ] **Look at the new menu** (JetBrains Mono, row spacing, GitHub icon, coffee icon). Screenshot it (⌘⇧4) and send it to Claude if anything looks off
 - [ ] Close the lid for 5+ min on battery with something running (e.g. `ping 1.1.1.1`) → reopen → still running
-- [ ] Hover **Safe Mode** in the menu → tooltip appears. Click it → warning with "Don't warn me again" → checkmark gone
-- [ ] Hotkey → Change → try ⌘Space (should warn "used by macOS") → try ⌃⌥K (should work)
+- [ ] Hover **Auto-Disable** → tooltip. Untick → warning with "Don't warn me again"
+- [ ] Click `≥80°C` → set 45 while active → Dex turns itself off within 30 s ("the chip is at …°C"). Set back to 80
+- [ ] Hot Key → try ⌘Space (warns "used by macOS"). Try ⌃⌥D before clearing it in Magnet (warns "used by Magnet")
 - [ ] Quit Dex → `pmset -g | grep SleepDisabled` shows `0`
 - [ ] New terminal → `dex` starts it. Spotlight → "Dex" finds it (with the green icon).
+
+- [ ] Happy with it → tell Claude "ship" → push + v1.2.0 release
 
 ## 3. Get people to use it (free)
 - [ ] Add a screenshot/GIF of the menu to the README (Cmd+Shift+5)

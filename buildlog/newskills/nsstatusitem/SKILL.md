@@ -40,3 +40,9 @@ Info.plist: `LSUIElement = true` (no Dock icon even before code runs).
 - `NSAlert.showsSuppressionButton` gives you a free "Don't warn me again" checkbox. Store its result in UserDefaults.
 - **Hover explanation + checkbox** on a menu item: `item.toolTip = "…"` and `item.state = .on/.off`. The system draws the checkmark and the hover tooltip. No custom view.
 - **Warn-once dialogs:** one helper that checks a UserDefaults key, shows `NSAlert` with `showsSuppressionButton`, and saves the key if ticked. Reuse it for every "Don't warn me again".
+- **Custom rows** (checkbox + buttons + icons in one line): `NSStackView(views:)` with `edgeInsets` left/right 14, `frame.size = fittingSize`, then `menuItem.view = stack`. Custom views get no hover highlight.
+- **Controls inside a row that open dialogs:** call `menu.cancelTracking()` first, then `DispatchQueue.main.async { alert }`. Otherwise the alert fights the open menu.
+- **Editable numbers:** don't put text fields inside the menu (typing is unreliable). Use a pill button (`bezelStyle = .inline`) that opens `NSAlert` with an `accessoryView` NSTextField and `window.initialFirstResponder = field`.
+- **Colored part of a title:** `attributedTitle` with 2 appended strings, e.g. `DEX — ` + green `ACTIVE`.
+- Icons: `NSImage(systemSymbolName: "cup.and.saucer")` for SF Symbols. Brand logos (GitHub) aren't SF Symbols, so bundle a PNG and set `isTemplate = true`.
+- **Don't automate screenshots** of your menu via `osascript … click menu bar item`. It blocks until the menu closes (hung 120 s). Ask the user.

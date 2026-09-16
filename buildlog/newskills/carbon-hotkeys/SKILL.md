@@ -37,3 +37,12 @@ Recording: `NSEvent.addLocalMonitorForEvents(matching: .keyDown)` while an NSAle
 - On a failed rebind, re-register the old hotkey. Unregistering first leaves you with none.
 - Save keyCode + modifiers + a display label (`charactersIgnoringModifiers`) in UserDefaults. Translating keyCode back to a character is heavy (`UCKeyTranslate`), so skip it.
 - `NSApp.activate(ignoringOtherApps:)` before the alert, or a background app's dialog won't get keyboard focus.
+
+## Window-manager conflicts (learned the hard way)
+- `RegisterEventHotKey` returned **noErr for ⌃⌥D while Magnet was using it**. Both apps fire. Carbon doesn't detect other apps' bindings.
+- **Magnet** (`com.crowdcafe.windowmagnet`): keys `horizontalCommands` / `verticalCommands` = JSON Data. Each command has `keyboardShortcut.enabled` + `shortcut.carbonKeyCode/carbonModifiers`.
+  Read via `CFPreferencesCopyAppValue(key, "com.crowdcafe.windowmagnet")` → `JSONSerialization`.
+  Terminal: `defaults export com.crowdcafe.windowmagnet - | plutil -extract horizontalCommands raw -o - - | base64 -d`
+- **Rectangle** (`com.knollsoft.Rectangle`): each action key = dict `{keyCode, modifierFlags}` (NSEvent flags → convert to Carbon).
+- **⌃⌥D, ⌃⌥F, ⌃⌥G, ⌃⌥E, ⌃⌥T are default window-manager shortcuts** (thirds). Avoid ⌃⌥+letter defaults. ⌃⌥⌘+letter is much safer.
+- Check on launch too, not only when rebinding. The user may install a window manager later.
