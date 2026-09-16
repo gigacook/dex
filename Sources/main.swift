@@ -1,9 +1,11 @@
 import Cocoa
 import Carbon
+import IOKit.ps
 import ServiceManagement
 
 let defaults = UserDefaults.standard
 let modMask = UInt32(cmdKey | controlKey | optionKey | shiftKey)
+let lowBattery = 15
 
 // MARK: - Sleep control (pmset disablesleep keeps the Mac awake even with the lid closed)
 
@@ -35,6 +37,23 @@ func installSudoRule() -> Bool {
     var err: NSDictionary?
     NSAppleScript(source: src)?.executeAndReturnError(&err)
     return err == nil
+}
+
+// MARK: - Safe mode checks: too hot, or on battery and low
+
+func unsafeReason() -> String? {
+    if ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue {
+        return "your Mac is getting too hot"
+    }
+    let info = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+    guard IOPSGetProvidingPowerSourceType(info).takeUnretainedValue() as String == kIOPSBatteryPowerValue else { return nil }
+    for ps in IOPSCopyPowerSourcesList(info).takeRetainedValue() as [CFTypeRef] {
+        if let d = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any],
+           let pct = d[kIOPSCurrentCapacityKey] as? Int, pct <= lowBattery {
+            return "the battery is at \(pct)%"
+        }
+    }
+    return nil
 }
 
 // MARK: - Global hotkey (Carbon: no Accessibility permission needed)
@@ -71,6 +90,32 @@ func label(_ e: NSEvent) -> String {
         + (f.contains(.shift) ? "⇧" : "") + (f.contains(.command) ? "⌘" : "") + key
 }
 
+// MARK: - Dialogs
+
+func alert(_ title: String, _ text: String) {
+    let a = NSAlert()
+    a.messageText = title
+    a.informativeText = text
+    NSApp.activate(ignoringOtherApps: true)
+    a.runModal()
+}
+
+/// Warning with "Don't warn me again". Returns true if the user confirmed (or muted it earlier).
+func confirm(_ title: String, _ text: String, ok: String, muteKey: String) -> Bool {
+    if defaults.bool(forKey: muteKey) { return true }
+    let a = NSAlert()
+    a.messageText = title
+    a.informativeText = text
+    a.showsSuppressionButton = true
+    a.suppressionButton?.title = "Don't warn me again"
+    a.addButton(withTitle: ok)
+    a.addButton(withTitle: "Cancel")
+    NSApp.activate(ignoringOtherApps: true)
+    guard a.runModal() == .alertFirstButtonReturn else { return false }
+    if a.suppressionButton?.state == .on { defaults.set(true, forKey: muteKey) }
+    return true
+}
+
 // MARK: - Icon: lightning bolt in a ring. Idle = thin template (white on dark bar), running = thicker green.
 
 func icon(running: Bool) -> NSImage {
@@ -98,25 +143,32 @@ func icon(running: Bool) -> NSImage {
 final class Dex: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let hotKeyItem = NSMenuItem(title: "", action: #selector(changeHotKey), keyEquivalent: "")
+    let safeItem = NSMenuItem(title: "Safe Mode", action: #selector(toggleSafeMode), keyEquivalent: "")
     var awake = false
+    var safeTimer: Timer?
 
     func applicationDidFinishLaunching(_: Notification) {
         _ = setSleepDisabled(false) // clear any leftover state from a crash
         if SMAppService.mainApp.status != .enabled { try? SMAppService.mainApp.register() }
+        defaults.register(defaults: ["code": 2, "mods": Int(controlKey | optionKey), "label": "⌃⌥D", "safeMode": true])
 
         let menu = NSMenu()
         for t in ["Dex by Daniel Trifunovic", "2026-09-16", "Malo periculosam libertatem quam quietum servitium"] {
             menu.addItem(withTitle: t, action: nil, keyEquivalent: "")
         }
         menu.addItem(withTitle: "github.com/gigacook", action: #selector(openGitHub), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Support Dex on Ko-fi ☕", action: #selector(openKofi), keyEquivalent: "").target = self
         menu.addItem(.separator())
+        safeItem.target = self
+        safeItem.toolTip = "Turns Dex off by itself if your Mac gets too hot, or if it's on battery "
+            + "and drops to \(lowBattery)%. Keeps a closed laptop from overheating or draining flat."
+        menu.addItem(safeItem)
         hotKeyItem.target = self
         menu.addItem(hotKeyItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Dex", action: #selector(NSApp.terminate), keyEquivalent: "q")
         item.menu = menu
 
-        defaults.register(defaults: ["code": 2, "mods": Int(controlKey | optionKey), "label": "⌃⌥D"])
         onHotKey = { [weak self] in self?.toggle() }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in onHotKey(); return noErr }, 1, &spec, nil, nil)
@@ -128,29 +180,56 @@ final class Dex: NSObject, NSApplicationDelegate {
 
     func refresh() {
         item.button?.image = icon(running: awake)
+        safeItem.state = defaults.bool(forKey: "safeMode") ? .on : .off
         hotKeyItem.title = "Hotkey: \(defaults.string(forKey: "label")!)  (click to change)"
+        // Check every 30 s while keeping the Mac awake with safe mode on
+        let watch = awake && defaults.bool(forKey: "safeMode")
+        if watch, safeTimer == nil {
+            safeTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.safetyCheck() }
+        } else if !watch {
+            safeTimer?.invalidate()
+            safeTimer = nil
+        }
+    }
+
+    func setAwake(_ want: Bool) -> Bool {
+        guard setSleepDisabled(want) || (installSudoRule() && setSleepDisabled(want)) else { return false }
+        awake = want
+        refresh()
+        return true
+    }
+
+    func safetyCheck() {
+        guard awake, defaults.bool(forKey: "safeMode"), let reason = unsafeReason(), setAwake(false) else { return }
+        alert("Safe Mode turned Dex off", "Your Mac can sleep normally again because \(reason).")
     }
 
     func toggle() {
-        let want = !awake
-        if want && !defaults.bool(forKey: "noHeatWarning") {
-            let a = NSAlert()
-            a.messageText = "Dex keeps your Mac awake, even with the lid closed"
-            a.informativeText = "Don't leave it closed in a bag or tight space for long. It can overheat."
-            a.showsSuppressionButton = true
-            a.suppressionButton?.title = "Don't warn me again"
-            a.addButton(withTitle: "Keep Awake")
-            a.addButton(withTitle: "Cancel")
-            NSApp.activate(ignoringOtherApps: true)
-            guard a.runModal() == .alertFirstButtonReturn else { return }
-            if a.suppressionButton?.state == .on { defaults.set(true, forKey: "noHeatWarning") }
+        guard !awake else { _ = setAwake(false); return }
+        if defaults.bool(forKey: "safeMode"), let reason = unsafeReason() {
+            return alert("Dex can't turn on right now", "Safe Mode is on and \(reason).")
         }
-        guard setSleepDisabled(want) || (installSudoRule() && setSleepDisabled(want)) else { return }
-        awake = want
+        guard confirm("Dex keeps your Mac awake, even with the lid closed",
+                      "Don't leave it closed in a bag or tight space for long. It can overheat.",
+                      ok: "Keep Awake", muteKey: "noHeatWarning") else { return }
+        _ = setAwake(true)
+    }
+
+    @objc func toggleSafeMode() {
+        let on = defaults.bool(forKey: "safeMode")
+        if on {
+            guard confirm("Turn off Safe Mode?",
+                          "Dex will no longer switch itself off when your Mac gets too hot or the battery runs low. "
+                              + "A closed laptop could overheat or drain completely.",
+                          ok: "Turn Off", muteKey: "noSafeOffWarning") else { return }
+        }
+        defaults.set(!on, forKey: "safeMode")
         refresh()
+        safetyCheck()
     }
 
     @objc func openGitHub() { NSWorkspace.shared.open(URL(string: "https://www.github.com/gigacook")!) }
+    @objc func openKofi() { NSWorkspace.shared.open(URL(string: "https://ko-fi.com/gigacook")!) }
 
     @objc func changeHotKey() {
         let a = NSAlert()
@@ -180,11 +259,7 @@ final class Dex: NSObject, NSApplicationDelegate {
         }
         if let problem {
             _ = registerHotKey(oldCode, oldMods)
-            let w = NSAlert()
-            w.messageText = problem
-            w.informativeText = "Keeping \(defaults.string(forKey: "label")!). Pick a different one."
-            w.runModal()
-            return
+            return alert(problem, "Keeping \(defaults.string(forKey: "label")!). Pick a different one.")
         }
         defaults.set(Int(p.code), forKey: "code")
         defaults.set(Int(p.mods), forKey: "mods")

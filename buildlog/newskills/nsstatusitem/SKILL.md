@@ -38,3 +38,5 @@ Info.plist: `LSUIElement = true` (no Dock icon even before code runs).
 - Custom menu actions need `.target = self` on items, or they stay disabled.
 - Call `NSApp.activate(ignoringOtherApps: true)` before `NSAlert.runModal()`, or the alert opens behind other apps.
 - `NSAlert.showsSuppressionButton` gives you a free "Don't warn me again" checkbox. Store its result in UserDefaults.
+- **Hover explanation + checkbox** on a menu item: `item.toolTip = "…"` and `item.state = .on/.off`. The system draws the checkmark and the hover tooltip. No custom view.
+- **Warn-once dialogs:** one helper that checks a UserDefaults key, shows `NSAlert` with `showsSuppressionButton`, and saves the key if ticked. Reuse it for every "Don't warn me again".

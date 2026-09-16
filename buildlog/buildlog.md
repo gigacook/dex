@@ -44,3 +44,29 @@ No Xcode project, no SwiftPM, no dependencies.
 ### Open / next
 - [ ] Manual test: ⌃⌥D → warning → password → green → close the lid
 - [x] ~~Homebrew tap / notarization~~: declined, $99/yr not worth it for now (2026-09-16)
+
+## Session 2: 2026-09-16, v1.1.0
+
+**Goal:** Safe Mode (on by default, hover tooltip, warning with "Don't warn again" when turning it off), a way to start Dex from the terminal, Spotlight visibility, Ko-fi + GitHub Sponsors, README, todo.md.
+
+### Timeline
+| Step | What | Result |
+|---|---|---|
+| 1 | Safe Mode: `ProcessInfo.thermalState` ≥ `.serious` OR on battery ≤ 15% (IOKit power sources), checked every 30 s while awake | Also blocks turning on if already unsafe |
+| 2 | Pulled out a `confirm(… muteKey:)` helper | Heat warning + Safe Mode off warning share one dialog function |
+| 3 | Menu item `Safe Mode` with `.state` checkmark + `.toolTip` | Tooltip on hover, no custom view needed |
+| 4 | App icon via `tools/make-icon.swift` → iconset → `iconutil` → `Resources/AppIcon.icns` | Spotlight/Finder/Launchpad show a green bolt instead of a blank icon |
+| 5 | `install.sh` appends `alias dex="open -a Dex"` to `~/.zshrc` / `~/.bash_profile` | `dex` starts it again. `open -a` never starts a second copy |
+| 6 | `.github/FUNDING.yml` (github + ko_fi), Ko-fi menu item, README badges | Accounts still need creating → `todo.md` |
+| 7 | Build, v1.1.0 release | First try, no compile errors |
+
+### Key decisions
+- **Spotlight:** nothing to build. Any `.app` in /Applications gets indexed. It only needed a real icon.
+- **Terminal command:** a shell alias instead of a binary in `/usr/local/bin` (that folder may not exist on Apple Silicon and can need sudo).
+- **Safe Mode trigger values:** thermal `.serious` (macOS's own throttling signal) and 15% battery. No temperature sensors, which need private APIs.
+- Donation usernames were assumed to be `gigacook` everywhere. Listed in todo.md to confirm.
+
+### Cost savers for next time
+- Menu item tooltip + checkmark = `item.toolTip` + `item.state`. Don't build a custom NSView.
+- One `confirm()` helper with a UserDefaults mute key covers every "warn once" dialog.
+- See `newskills/iokit-power` and `newskills/iconutil`.
