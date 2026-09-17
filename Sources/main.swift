@@ -315,10 +315,37 @@ func rowItem(_ views: [NSView], tip: String) -> NSMenuItem {
     return item
 }
 
+// MARK: - Menu bar placement
+
+// On notched MacBooks, status items that don't fit are silently hidden behind the notch.
+// It happens whenever the bar gets busier: a Focus / Do Not Disturb icon appearing, or the
+// bar re-laying itself out after wake. macOS gives no event for it, so Dex checks its own spot.
+let statusAutosave = "dex"
+let positionKey = "NSStatusItem Preferred Position \(statusAutosave)"
+
+/// Creates the icon. With no saved spot yet (or when rescuing it), it asks for the slot right
+/// next to the system icons: the last place to disappear behind the notch.
+func makeStatusItem(nearClock: Bool) -> NSStatusItem {
+    if nearClock || defaults.object(forKey: positionKey) == nil { defaults.set(1.0, forKey: positionKey) }
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    item.autosaveName = statusAutosave // remembers where you ⌘-drag it
+    item.isVisible = true
+    return item
+}
+
+/// True when the icon's window sits under the notch or off the screen.
+func isHidden(_ item: NSStatusItem) -> Bool {
+    guard let window = item.button?.window, let screen = window.screen ?? NSScreen.screens.first else { return true }
+    let f = window.frame, s = screen.frame
+    if f.maxX <= s.minX || f.minX >= s.maxX || !window.isVisible { return true }
+    guard let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea else { return false } // no notch
+    return f.midX > s.minX + left.width && f.midX < s.maxX - right.width
+}
+
 // MARK: - App
 
 final class Dex: NSObject, NSApplicationDelegate {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    var item = makeStatusItem(nearClock: false)
     let stateItem = NSMenuItem(title: "", action: #selector(toggleFromMenu), keyEquivalent: "")
     let hotKeyItem = NSMenuItem(title: "", action: #selector(changeHotKey), keyEquivalent: "")
     let safeBox = NSButton(checkboxWithTitle: "Auto-Disable when", target: nil, action: #selector(toggleSafeMode))
@@ -326,6 +353,7 @@ final class Dex: NSObject, NSApplicationDelegate {
     lazy var tempPill = pill("Chip temperature at or above this. Click to change.", self, #selector(editTemp))
     var awake = false
     var safeTimer: Timer?
+    var lastRescue = Date.distantPast
 
     func applicationDidFinishLaunching(_: Notification) {
         _ = setSleepDisabled(false) // clear any leftover state from a crash
@@ -365,6 +393,7 @@ final class Dex: NSObject, NSApplicationDelegate {
         quit.attributedTitle = NSAttributedString(string: "Quit Dex", attributes: [.font: mono()])
         menu.addItem(quit)
         item.menu = menu
+        watchPlacement()
 
         onHotKey = { [weak self] in self?.toggle() }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -378,6 +407,36 @@ final class Dex: NSObject, NSApplicationDelegate {
         } else if let c = conflict(code, mods), !defaults.bool(forKey: "allowed-\(code)-\(mods)") {
             if resolve(c, label: label) == .pickAnother { changeHotKey() } else { rememberAllowed(code, mods) }
         }
+    }
+
+    /// Re-checks the icon after wake, screen changes, and once a minute (Focus / DND has no event).
+    func watchPlacement() {
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            ws.addObserver(self, selector: #selector(placementChanged), name: name, object: nil)
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(placementChanged),
+                                               name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.rescueIfHidden() }
+    }
+
+    /// The bar re-lays itself out for a few seconds after wake, so look once it has settled.
+    @objc func placementChanged() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.rescueIfHidden() }
+    }
+
+    /// Hidden behind the notch: re-add the icon next to the system icons. At most every 5 minutes,
+    /// so Dex never ends up fighting another app over the same spot.
+    func rescueIfHidden() {
+        guard isHidden(item), Date().timeIntervalSince(lastRescue) > 300 else { return }
+        lastRescue = Date()
+        let menu = item.menu
+        NSStatusBar.system.removeStatusItem(item)
+        item = makeStatusItem(nearClock: true)
+        item.menu = menu
+        refresh()
+        NSLog("Dex: menu bar icon was hidden (notch or full menu bar), moved it next to the system icons")
     }
 
     /// After "Use Anyway": don't ask about this clash again at every launch.
