@@ -88,13 +88,17 @@ func unsafeReason() -> String? {
 
 // MARK: - Global hotkey (Carbon: no Accessibility permission needed)
 
-var hotKeyRef: EventHotKeyRef?
-var onHotKey: () -> Void = {}
+var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]
+var onHotKey: (UInt32) -> Void = { _ in }
 
-func registerHotKey(_ code: UInt32, _ mods: UInt32) -> Bool {
-    if let r = hotKeyRef { UnregisterEventHotKey(r); hotKeyRef = nil }
-    let id = EventHotKeyID(signature: OSType(0x4445_5831), id: 1) // "DEX1"
-    return RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &hotKeyRef) == noErr
+/// id 1 = keep awake, 2 = memory hogs (M), 3 = sweep build slop (K).
+func registerHotKey(_ code: UInt32, _ mods: UInt32, id hotKeyID: UInt32 = 1) -> Bool {
+    if let r = hotKeyRefs[hotKeyID] { UnregisterEventHotKey(r); hotKeyRefs[hotKeyID] = nil }
+    let id = EventHotKeyID(signature: OSType(0x4445_5831), id: hotKeyID) // "DEX1"
+    var ref: EventHotKeyRef?
+    guard RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &ref) == noErr else { return false }
+    hotKeyRefs[hotKeyID] = ref
+    return true
 }
 
 func carbonMods(_ f: NSEvent.ModifierFlags) -> UInt32 {
@@ -342,6 +346,118 @@ func isHidden(_ item: NSStatusItem) -> Bool {
     return f.midX > s.minX + left.width && f.midX < s.maxX - right.width
 }
 
+// MARK: - Processes (memory hogs, build slop)
+
+struct Proc {
+    let pid: Int32, ppid: Int32, uid: UInt32, cpu: Double, mem: Double, rssMB: Double, tty: String, path: String, args: String
+    var name: String { (path as NSString).lastPathComponent }
+}
+
+struct Slop {
+    let pid: Int32, name: String, reason: String, rssMB: Double
+}
+
+func out(_ tool: String, _ args: [String]) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: tool)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return "" }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(decoding: data, as: UTF8.self)
+}
+
+/// `ps` twice: both `comm` and `args` can contain spaces, so each needs to be the last column.
+func processes() -> [Proc] {
+    var argsByPID: [Int32: String] = [:]
+    for line in out("/bin/ps", ["-axww", "-o", "pid=,args="]).split(separator: "\n") {
+        let t = line.drop { $0 == " " }
+        guard let sp = t.firstIndex(of: " "), let pid = Int32(t[..<sp]) else { continue }
+        argsByPID[pid] = String(t[sp...].drop { $0 == " " })
+    }
+    return out("/bin/ps", ["-axo", "pid=,ppid=,uid=,pcpu=,pmem=,rss=,tty=,comm="]).split(separator: "\n").compactMap { line in
+        let f = line.split(separator: " ", maxSplits: 7, omittingEmptySubsequences: true)
+        guard f.count == 8, let pid = Int32(f[0]), let ppid = Int32(f[1]), let uid = UInt32(f[2]),
+              let cpu = Double(f[3]), let mem = Double(f[4]), let rss = Double(f[5]) else { return nil }
+        return Proc(pid: pid, ppid: ppid, uid: uid, cpu: cpu, mem: mem, rssMB: rss / 1024, tty: String(f[6]),
+                    path: String(f[7]), args: argsByPID[pid] ?? String(f[7]))
+    }
+}
+
+func memoryHogs(threshold: Double = 1.0) -> [Proc] {
+    processes().filter { $0.mem >= threshold }.sorted { $0.mem > $1.mem }
+}
+
+/// SIGTERM (or SIGHUP for a shell), then SIGKILL if it is still there a moment later.
+@discardableResult
+func endProcess(_ pid: Int32, hangup: Bool = false) -> Bool {
+    guard pid > 1, kill(pid, 0) == 0 else { return false }
+    kill(pid, hangup ? SIGHUP : SIGTERM)
+    for _ in 0..<12 {
+        usleep(100_000)
+        if kill(pid, 0) != 0 { return true }
+    }
+    kill(pid, SIGKILL)
+    usleep(150_000)
+    return kill(pid, 0) != 0
+}
+
+/// Leftovers from building: dev servers, automation browsers, idle terminals, orphaned build tools.
+func buildSlop() -> [Slop] {
+    let all = processes()
+    let me = getpid(), uid = getuid()
+    var parents: [Int32: Proc] = [:], childCount: [Int32: Int] = [:]
+    for p in all { parents[p.pid] = p; childCount[p.ppid, default: 0] += 1 }
+    var safe: Set<Int32> = [me]           // never touch Dex or whatever launched it
+    var walk = parents[me]?.ppid
+    while let pid = walk, pid > 1, !safe.contains(pid) { safe.insert(pid); walk = parents[pid]?.ppid }
+
+    let listening = Set(out("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fp"]).split(separator: "\n")
+        .compactMap { $0.hasPrefix("p") ? Int32($0.dropFirst()) : nil })
+    let shells: Set<String> = ["zsh", "-zsh", "bash", "-bash", "fish", "-fish", "sh", "-sh"]
+    let keep: Set<String> = ["claude", "Claude", "login", "launchd", "Terminal", "iTerm2", "ssh", "sshd", "Dex"]
+    let runtimes: Set<String> = ["node", "ruby", "php", "deno", "bun", "perl"]
+    let builders: Set<String> = ["swift-frontend", "swift-build", "swift-driver", "clang", "esbuild", "tsc", "sourcekit-lsp", "clangd"]
+    let servers = ["http.server", "uvicorn", "gunicorn", "flask", "runserver", "streamlit", "jupyter", "vite",
+                   "next dev", "webpack serve", "webpack-dev-server", "http-server", "live-server", "php -S",
+                   "hugo server", "jekyll serve", "rails server", "nodemon"]
+    let robots = ["--headless", "--enable-automation", "ms-playwright", "puppeteer", "chromedriver", "geckodriver", "safaridriver"]
+
+    func idleMinutes(_ tty: String) -> Double? {
+        var st = stat()
+        guard stat("/dev/" + tty, &st) == 0 else { return nil }
+        return (Date().timeIntervalSince1970 - Double(st.st_atimespec.tv_sec)) / 60
+    }
+
+    return all.compactMap { p -> Slop? in
+        let name = p.name
+        guard p.uid == uid, p.pid > 1, !safe.contains(p.pid), !keep.contains(name) else { return nil }
+        let bundled = p.path.contains(".app/Contents/") || p.path.hasPrefix("/System/")
+        let isPython = name.range(of: #"^[Pp]ython(\d+(\.\d+)?)?$"#, options: .regularExpression) != nil
+        let runtime = isPython || runtimes.contains(name)
+        var why: String?
+
+        if robots.contains(where: { p.args.contains($0) }) {
+            // Only the root of an automation browser; its helpers go down with it.
+            if let parent = parents[p.ppid], robots.contains(where: { parent.args.contains($0) }) { return nil }
+            why = "automation browser"
+        } else if listening.contains(p.pid), !bundled, runtime || servers.contains(where: { p.args.contains($0) }) {
+            why = "dev server"
+        } else if shells.contains(name), p.tty != "??", childCount[p.pid] == nil,
+                  let parent = parents[p.ppid], !["tmux", "screen", "zellij"].contains(parent.name),
+                  let idle = idleMinutes(p.tty), idle >= 30 {
+            why = "idle terminal \(Int(idle)) min"
+        } else if p.ppid == 1, !bundled {
+            if builders.contains(name) { why = "orphaned build tool" }
+            else if runtime, p.cpu >= 50 || p.rssMB >= 500 { why = "runaway orphan" }
+        }
+        return why.map { Slop(pid: p.pid, name: name, reason: $0, rssMB: p.rssMB) }
+    }
+}
+
 // MARK: - App
 
 final class Dex: NSObject, NSApplicationDelegate {
@@ -351,6 +467,8 @@ final class Dex: NSObject, NSApplicationDelegate {
     let safeBox = NSButton(checkboxWithTitle: "Auto-Disable when", target: nil, action: #selector(toggleSafeMode))
     lazy var batteryPill = pill("Battery at or below this (on battery). Click to change.", self, #selector(editBattery))
     lazy var tempPill = pill("Chip temperature at or above this. Click to change.", self, #selector(editTemp))
+    let memItem = NSMenuItem(title: "", action: #selector(memcheckFromMenu), keyEquivalent: "")
+    let sweepItem = NSMenuItem(title: "", action: #selector(sweepFromMenu), keyEquivalent: "")
     var awake = false
     var safeTimer: Timer?
     var lastRescue = Date.distantPast
@@ -376,6 +494,14 @@ final class Dex: NSObject, NSApplicationDelegate {
         hotKeyItem.target = self
         menu.addItem(hotKeyItem)
         menu.addItem(.separator())
+        memItem.target = self
+        memItem.toolTip = "Processes using 1% of RAM or more, newest reading, with the option to end one."
+        menu.addItem(memItem)
+        sweepItem.target = self
+        sweepItem.toolTip = "Closes leftovers from builds: dev servers, automation browsers, terminals idle 30+ minutes "
+            + "and orphaned build tools. Your apps, browsers and busy terminals are left alone."
+        menu.addItem(sweepItem)
+        menu.addItem(.separator())
         let gh = NSImage(contentsOfFile: Bundle.main.path(forResource: "github", ofType: "png") ?? "")
         gh?.size = NSSize(width: 14, height: 14)
         gh?.isTemplate = true
@@ -395,12 +521,25 @@ final class Dex: NSObject, NSApplicationDelegate {
         item.menu = menu
         watchPlacement()
 
-        onHotKey = { [weak self] in self?.toggle() }
+        onHotKey = { [weak self] id in
+            switch id {
+            case 2: self?.showMemcheck()
+            case 3: self?.sweepSlop()
+            default: self?.toggle()
+            }
+        }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in onHotKey(); return noErr }, 1, &spec, nil, nil)
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var id = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
+            onHotKey(id.id)
+            return noErr
+        }, 1, &spec, nil, nil)
         let code = UInt32(defaults.integer(forKey: "code")), mods = UInt32(defaults.integer(forKey: "mods"))
         let label = defaults.string(forKey: "label")!
         refresh()
+        registerToolKeys()
         if !registerHotKey(code, mods) {
             alert("Hotkey \(label) isn't working", "Another app has it. Pick a new one.")
             changeHotKey()
@@ -536,6 +675,85 @@ final class Dex: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: Memory hogs (M) and build slop sweep (K)
+
+    /// Same modifiers as the keep-awake hotkey, with M and K.
+    func registerToolKeys() {
+        let mods = UInt32(defaults.integer(forKey: "mods"))
+        _ = registerHotKey(46, mods, id: 2) // M
+        _ = registerHotKey(40, mods, id: 3) // K
+        let label = defaults.string(forKey: "label")!.dropLast()
+        memItem.attributedTitle = NSAttributedString(string: "Memory Hogs    \(label)M", attributes: [.font: mono()])
+        sweepItem.attributedTitle = NSAttributedString(string: "Sweep Build Slop    \(label)K", attributes: [.font: mono()])
+    }
+
+    @objc func memcheckFromMenu() { afterMenu { self.showMemcheck() } }
+    @objc func sweepFromMenu() { afterMenu { self.sweepSlop() } }
+
+    /// memcheck: what is eating RAM, with the option to end one.
+    func showMemcheck() {
+        let rows = Array(memoryHogs().prefix(12))
+        guard !rows.isEmpty else { return alert("Nothing is hogging RAM", "No process is using 1% or more.") }
+        let list = rows.map {
+            String(format: "%-7d %5.1f%% %8.0f MB  %@", $0.pid, $0.mem, $0.rssMB, String($0.name.prefix(28)))
+        }.joined(separator: "\n")
+        let a = NSAlert()
+        a.messageText = "Memory hogs"
+        a.informativeText = "Using 1% of RAM or more, biggest first."
+        let text = NSTextField(labelWithString: "    PID   %MEM      RSS  NAME\n" + list)
+        text.font = mono(11)
+        text.frame.size = text.fittingSize
+        a.accessoryView = text
+        a.addButton(withTitle: "End a Process…")
+        a.addButton(withTitle: "Close")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+
+        let ask = NSAlert()
+        ask.messageText = "End which process?"
+        ask.informativeText = "Type its PID. It is asked to quit first, then forced if it ignores that."
+        let field = NSTextField(string: String(rows[0].pid))
+        field.font = mono()
+        field.frame = NSRect(x: 0, y: 0, width: 90, height: 24)
+        ask.accessoryView = field
+        ask.window.initialFirstResponder = field
+        ask.addButton(withTitle: "End")
+        ask.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard ask.runModal() == .alertFirstButtonReturn,
+              let pid = Int32(field.stringValue.trimmingCharacters(in: .whitespaces)),
+              let row = rows.first(where: { $0.pid == pid }) else { return NSSound.beep() }
+        alert(endProcess(pid) ? "Ended \(row.name)" : "Couldn't end \(row.name)",
+              endProcess(pid) ? "" : "It may need admin rights, or it is already gone.")
+    }
+
+    /// Closes build leftovers and says what went.
+    func sweepSlop() {
+        let targets = buildSlop()
+        guard !targets.isEmpty else {
+            return alert("Nothing to sweep", "No dev servers, automation browsers, idle terminals or orphaned build tools.")
+        }
+        var closed: [Slop] = [], left: [Slop] = []
+        for t in targets {
+            if endProcess(t.pid, hangup: t.reason.hasPrefix("idle terminal")) { closed.append(t) } else { left.append(t) }
+        }
+        let lines = (closed + left).map { t -> String in
+            let survived = left.contains { $0.pid == t.pid }
+            return String(format: "%-7d %-22@ %6.0f MB  %@", t.pid, t.name as NSString, t.rssMB,
+                          survived ? t.reason + " (survived)" : t.reason)
+        }.joined(separator: "\n")
+        let freed = closed.reduce(0.0) { $0 + $1.rssMB }
+        let a = NSAlert()
+        a.messageText = "Closed \(closed.count), freed \(Int(freed)) MB"
+        a.informativeText = "Swept dev servers, automation browsers, idle terminals and orphaned build tools."
+        let text = NSTextField(labelWithString: lines)
+        text.font = mono(11)
+        text.frame.size = text.fittingSize
+        a.accessoryView = text
+        NSApp.activate(ignoringOtherApps: true)
+        a.runModal()
+    }
+
     @objc func openGitHub() { afterMenu { NSWorkspace.shared.open(URL(string: "https://www.github.com/gigacook")!) } }
     @objc func openKofi() { afterMenu { NSWorkspace.shared.open(URL(string: "https://ko-fi.com/gigacook")!) } }
 
@@ -570,6 +788,7 @@ final class Dex: NSObject, NSApplicationDelegate {
         defaults.set(Int(p.code), forKey: "code")
         defaults.set(Int(p.mods), forKey: "mods")
         defaults.set(p.label, forKey: "label")
+        registerToolKeys()
         refresh()
     }
 }

@@ -25,6 +25,9 @@ DEX — INACTIVE                          click to switch (ACTIVE = green)
 ☑ Auto-Disable when  [≤15%] [≥80°C]     click a value to change it
 Hot Key: ⌃⌥D  (click to change)
 ─────────────────────────────────
+Memory Hogs        ⌃⌥M                  what is eating your RAM
+Sweep Build Slop   ⌃⌥K                  close what a build left running
+─────────────────────────────────
 by Daniel Trifunovic   [GitHub]  ☕ Support Dex
 ─────────────────────────────────
 Quit Dex
@@ -48,6 +51,25 @@ Dex switches itself **off** and tells you why when:
 It checks every 30 seconds while active, and won't turn on if either is already true.
 - **Change the values:** click `≤15%` (5–90) or `≥80°C` (50–105). Hover the row for an explanation.
 - **Turn it off:** untick the checkbox → warning with "Don't warn me again".
+
+### Memory Hogs (⌃⌥M)
+Everything using **1% of RAM or more**, biggest first, with PID, %MEM, RSS and name. *End a Process…* takes a PID
+(the biggest one is filled in), asks it to quit, and forces it only if it ignores that.
+
+### Sweep Build Slop (⌃⌥K)
+Long sessions leave things running. One press closes them and tells you what went and how much RAM came back:
+
+| Closed | Left alone |
+|---|---|
+| **Dev servers** — Python, Node, Ruby, PHP, Deno, Bun or `http.server`/uvicorn/vite-style processes holding a port | Servers that belong to an installed app |
+| **Automation browsers** — headless, Playwright, Puppeteer, chromedriver and friends | Your normal browser windows |
+| **Idle terminals** — a shell with nothing running in it and no typing for 30+ minutes | Anything inside tmux, screen or zellij |
+| **Orphaned build tools** — swift, clang, esbuild, tsc left behind, and Node/Python orphans over 50% CPU or 500 MB | — |
+
+It never touches other users' processes, system processes, Claude, Terminal, iTerm, ssh or Dex itself. A terminal with
+something running in it is never idle, so a working session is safe.
+
+Both hotkeys follow the modifiers of your keep-awake shortcut: change it to ⌘⌥D and they become ⌘⌥M and ⌘⌥K.
 
 ### Hotkey and clashing apps
 Default is **⌃⌥D**. Click *Hot Key* and press a new combo (it needs ⌘, ⌃ or ⌥). Esc cancels.
