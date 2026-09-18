@@ -19,26 +19,25 @@ Requires macOS 13 or later, on Apple Silicon or Intel.
 
 ## The menu
 
-```
-DEX — INACTIVE                          click to switch (ACTIVE = green)
-─────────────────────────────────
-☑ Auto-Disable when  [≤15%] [≥80°C]     click a value to change it
-Hot Key: ⌃⌥D  (click to change)
-─────────────────────────────────
-Memory Hogs        ⌃⌥M                  what is eating your RAM
-Sweep Build Slop   ⌃⌥K                  close what a build left running
-─────────────────────────────────
-by Daniel Trifunovic   [GitHub]  ☕ Support Dex
-─────────────────────────────────
-Quit Dex
-```
+Click the icon and the panel slides down.
+
+![The Dex menu](docs/dex-menu.png)
 
 Menu bar icon: **thin ring + bolt = inactive**, **thicker green = keeping your Mac awake**.
+
+### One panel at a time
+
+The menu, memcheck and sweep share a single slot:
+
+- **esc** closes whichever is on screen.
+- The **same hotkey again** closes it.
+- A **different hotkey** swaps it — memcheck open, press ⌃⌥K and sweep takes its place.
+- Clicking anywhere else closes the menu, the way a menu should.
 
 ## How it behaves
 
 ### Turning it on / off
-- Press **⌃⌥D** (or your own hotkey), or click `DEX — INACTIVE` in the menu.
+- Press **⌃⌥D** (or your own hotkey), or click **⌃⌥D  Keep Awake** in the menu.
 - **The first time:** a heat warning ("don't leave it closed in a bag"), with "Don't warn me again".
 - **The first time only:** macOS asks for your password. Dex uses it to add one rule, `/etc/sudoers.d/dex`, that lets it run exactly `pmset -a disablesleep 0` and `1`, nothing else. After that, switching is instant with no password.
 - **Quitting Dex, restarting the Mac, or Dex crashing** always ends with normal sleep. Dex resets it at launch and at quit.
@@ -52,12 +51,28 @@ It checks every 30 seconds while active, and won't turn on if either is already 
 - **Change the values:** click `≤15%` (5–90) or `≥80°C` (50–105). Hover the row for an explanation.
 - **Turn it off:** untick the checkbox → warning with "Don't warn me again".
 
-### Memory Hogs (⌃⌥M)
-Everything using **1% of RAM or more**, biggest first, with PID, %MEM, RSS and name. *End a Process…* takes a PID
-(the biggest one is filled in), asks it to quit, and forces it only if it ignores that.
+### memcheck (⌃⌥M)
 
-### Sweep Build Slop (⌃⌥K)
-Long sessions leave things running. One press closes them and tells you what went and how much RAM came back:
+![memcheck](docs/memcheck.png)
+
+Your processes using **1% of RAM or more**, biggest first, **four at a time**. Press **1**–**4**, or click the box,
+to end the one on that row: it is asked to quit, and forced only if it ignores that.
+
+Clear all four and the panel shakes, flashes, and the next four slide up from underneath. When nothing is left over
+1%, it breathes green once and closes itself.
+
+It lists only processes **you** own, never `loginwindow` and never Dex. Ending something is a single keypress here,
+so anything that would take your login session down with it is kept off the list.
+
+### sweep (⌃⌥K)
+
+![sweep](docs/sweep.png)
+
+Long sessions leave things running. One press closes them and reports what went, grouped by kind, with the RAM that
+came back. Anything that refused to close is listed as *left*.
+
+The panel **closes itself after five seconds** — the count runs down beside *esc to close*. Hover over it or click
+it and the timer stops for good; after that only esc closes it.
 
 | Closed | Left alone |
 |---|---|

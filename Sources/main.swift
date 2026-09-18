@@ -383,12 +383,21 @@ func processes() -> [Proc] {
         guard f.count == 8, let pid = Int32(f[0]), let ppid = Int32(f[1]), let uid = UInt32(f[2]),
               let cpu = Double(f[3]), let mem = Double(f[4]), let rss = Double(f[5]) else { return nil }
         return Proc(pid: pid, ppid: ppid, uid: uid, cpu: cpu, mem: mem, rssMB: rss / 1024, tty: String(f[6]),
-                    path: String(f[7]), args: argsByPID[pid] ?? String(f[7]))
+                    path: String(f[7]).trimmingCharacters(in: .whitespaces),
+                    args: argsByPID[pid] ?? String(f[7]).trimmingCharacters(in: .whitespaces))
     }
 }
 
 func memoryHogs(threshold: Double = 1.0) -> [Proc] {
     processes().filter { $0.mem >= threshold }.sorted { $0.mem > $1.mem }
+}
+
+/// The hogs it is safe to put behind a single keypress: yours, and not something the login
+/// session rests on. Ending WindowServer or loginwindow logs you out; the old dialog made you
+/// type the PID, which was guard enough, but a numbered End button is not.
+func endableHogs() -> [Proc] {
+    let uid = getuid(), me = getpid()
+    return memoryHogs().filter { $0.uid == uid && $0.pid != me && !["loginwindow", "Dex"].contains($0.name) }
 }
 
 /// SIGTERM (or SIGHUP for a shell), then SIGKILL if it is still there a moment later.
@@ -458,73 +467,742 @@ func buildSlop() -> [Slop] {
     }
 }
 
+// MARK: - Tool sheets (M and K): a dark panel that slides down from the menu bar
+
+/// The green from the app icon — the one accent these sheets use.
+let dexGreen = NSColor(srgbRed: 0.31, green: 0.86, blue: 0.47, alpha: 1)
+let panelInk = NSColor(white: 1, alpha: 0.85)
+let panelDim = NSColor(white: 1, alpha: 0.35)
+
+func panelLabel(_ s: String, _ size: CGFloat, _ color: NSColor, bold: Bool = false) -> NSTextField {
+    let t = NSTextField(labelWithString: s)
+    t.font = mono(size, bold: bold)
+    t.textColor = color
+    t.sizeToFit()
+    return t
+}
+
+func hairline(_ frame: NSRect) -> NSView {
+    let v = NSView(frame: frame)
+    v.wantsLayer = true
+    v.layer?.backgroundColor = NSColor(white: 1, alpha: 0.09).cgColor
+    return v
+}
+
+/// Borderless panels refuse key status by default; these sheets live on esc and the number keys.
+final class SlidePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+/// Top-down coordinates, and it tells the sheet when the pointer arrives or a click lands.
+final class PanelBody: NSView {
+    var onTouch: (() -> Void)?
+    override var isFlipped: Bool { true }
+
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) { onTouch?() }
+    override func mouseDown(with event: NSEvent) { onTouch?() }
+}
+
+/// Rows stack downwards inside this.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// A flat key cap: the digit you can press, then what pressing it does.
+final class KeyButton: NSButton {
+    var spent = false {
+        didSet {
+            isEnabled = !spent
+            if spent { layer?.removeAnimation(forKey: "breathe") }
+            layer?.backgroundColor = NSColor(white: 1, alpha: spent ? 0.02 : 0.07).cgColor
+            layer?.borderColor = NSColor(white: 1, alpha: spent ? 0.06 : 0.14).cgColor
+        }
+    }
+
+    private let cap: String
+
+    /// `cap` is what you press — a digit, or a hotkey like ⌃⌥M.
+    init(cap: String, word: String, minWidth: CGFloat = 0, target: AnyObject, action: Selector) {
+        self.cap = cap
+        let text = cap + "  " + word
+        let fitted = ceil(mono(11).maximumAdvancement.width * CGFloat(text.count)) + 18
+        super.init(frame: NSRect(x: 0, y: 0, width: max(minWidth, fitted), height: 21))
+        self.target = target
+        self.action = action
+        isBordered = false
+        setButtonType(.momentaryChange)
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = NSColor(white: 1, alpha: 0.07).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
+        let t = NSMutableAttributedString(string: cap,
+                                          attributes: [.font: mono(11, bold: true), .foregroundColor: dexGreen])
+        t.append(NSAttributedString(string: "  " + word,
+                                    attributes: [.font: mono(11), .foregroundColor: panelInk]))
+        attributedTitle = t
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    /// Re-labels the box without touching its key cap or its width.
+    func setWord(_ word: String) {
+        let t = NSMutableAttributedString(string: cap,
+                                          attributes: [.font: mono(11, bold: true), .foregroundColor: dexGreen])
+        t.append(NSAttributedString(string: "  " + word,
+                                    attributes: [.font: mono(11), .foregroundColor: panelInk]))
+        attributedTitle = t
+    }
+
+    /// A slow pulse around the box, so the keys read as live things waiting to be pressed.
+    /// Staggered by row, which looks like breathing rather than a blinking row of lights.
+    func breathe(delay: Double) {
+        let pulse = CABasicAnimation(keyPath: "borderColor")
+        pulse.fromValue = NSColor(white: 1, alpha: 0.14).cgColor
+        pulse.toValue = dexGreen.withAlphaComponent(0.6).cgColor
+        pulse.duration = 1.5
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        pulse.beginTime = CACurrentMediaTime() + delay
+        layer?.add(pulse, forKey: "breathe")
+    }
+}
+
+/// The same box the key caps wear, with nothing to press: sweep has already happened, so its
+/// rows report a count instead of offering a key.
+func capChip(_ cap: String, _ word: String, width: CGFloat, dim: Bool) -> NSView {
+    let box = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 21))
+    box.wantsLayer = true
+    box.layer?.cornerRadius = 5
+    box.layer?.backgroundColor = NSColor(white: 1, alpha: dim ? 0.03 : 0.07).cgColor
+    box.layer?.borderWidth = 1
+    box.layer?.borderColor = NSColor(white: 1, alpha: dim ? 0.07 : 0.14).cgColor
+    let t = NSMutableAttributedString(string: cap, attributes: [
+        .font: mono(11, bold: true), .foregroundColor: dim ? panelDim : dexGreen])
+    t.append(NSAttributedString(string: "  " + word, attributes: [
+        .font: mono(11), .foregroundColor: dim ? panelDim : panelInk]))
+    let label = NSTextField(labelWithAttributedString: t)
+    label.sizeToFit()
+    label.frame.origin = NSPoint(x: (width - label.frame.width) / 2, y: (21 - label.frame.height) / 2)
+    box.addSubview(label)
+    return box
+}
+
+/// Shared chrome: the icon, the lowercase green name beside it, an "esc to close" note top right,
+/// and the drop-down/pull-up. Subclasses fill the area below `headerHeight`.
+class ToolPanel: NSObject {
+    static let headerHeight: CGFloat = 46
+
+    /// Which of the three sheets this is, so a hotkey can tell "close me" from "swap to me".
+    enum Kind { case dex, memcheck, sweep }
+
+    let kind: Kind
+    let width: CGFloat
+    let panel = SlidePanel(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                           styleMask: [.borderless], backing: .buffered, defer: false)
+    let body = PanelBody()
+    let note = panelLabel("esc to close", 9.5, panelDim)
+    let title: NSTextField
+    /// Menus go away when you click past them; the dex sheet is a menu, the other two are not.
+    var closeWhenClickedAway = false
+    /// Called just before a click-away closes the sheet.
+    var onClickedAway: (() -> Void)?
+    private var keyMonitor: Any?
+    private var resignObserver: Any?
+    private(set) var onScreen = false
+
+    init(kind: Kind, name: String, width: CGFloat) {
+        self.kind = kind
+        self.width = width
+        self.title = panelLabel(name, 15, dexGreen, bold: true)
+        super.init()
+
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .statusBar
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.appearance = NSAppearance(named: .darkAqua)
+
+        body.wantsLayer = true
+        body.layer?.cornerRadius = 12
+        body.layer?.masksToBounds = true
+        body.layer?.backgroundColor = NSColor(srgbRed: 0.105, green: 0.105, blue: 0.115, alpha: 1).cgColor
+        body.layer?.borderWidth = 1
+        body.layer?.borderColor = NSColor(white: 1, alpha: 0.10).cgColor
+        panel.contentView = body
+
+        let icon = NSImageView(frame: NSRect(x: 14, y: 11, width: 23, height: 23))
+        icon.image = NSApp.applicationIconImage
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        body.addSubview(icon)
+
+        title.frame.origin = NSPoint(x: 46, y: 14)
+        body.addSubview(title)
+
+        body.addSubview(note)
+        placeNote()
+        body.addSubview(hairline(NSRect(x: 14, y: Self.headerHeight - 1, width: width - 28, height: 1)))
+    }
+
+    /// The note is right-aligned, so it has to be repositioned whenever its text changes length.
+    func placeNote() {
+        note.sizeToFit()
+        note.frame.origin = NSPoint(x: width - 14 - note.frame.width, y: 17)
+    }
+
+    // MARK: Showing and hiding
+
+    /// Drops the sheet out from behind the menu bar, hanging off the status item.
+    func present(height: CGFloat, anchor: NSRect?) {
+        let screen = anchor.flatMap { a in NSScreen.screens.first { $0.frame.intersects(a) } }
+            ?? NSScreen.main ?? NSScreen.screens[0]
+        let visible = screen.visibleFrame
+        let wanted = (anchor?.maxX ?? visible.maxX) - width
+        let x = min(max(visible.minX + 8, wanted), visible.maxX - width - 8)
+        let rest = NSRect(x: x, y: visible.maxY - height - 6, width: width, height: height)
+
+        panel.setFrame(rest.offsetBy(dx: 0, dy: height + 10), display: false)
+        panel.alphaValue = 0
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        onScreen = true
+        installKeys()
+        if closeWhenClickedAway {
+            // Armed late: the sheet is still taking key focus while it slides in, and an early
+            // resign would snap it shut before it had finished appearing.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [self] in
+                guard onScreen, resignObserver == nil else { return }
+                resignObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
+                        self?.onClickedAway?()
+                        self?.dismiss()
+                    }
+            }
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(rest, display: true)
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    func dismiss() { dismiss(animated: true) }
+
+    /// Slides back up the way it came. Swapping one sheet for another skips the animation, or the
+    /// two would slide past each other in the same patch of screen.
+    func dismiss(animated: Bool) {
+        guard onScreen else { return }
+        onScreen = false
+        removeKeys()
+        guard animated else { return panel.orderOut(nil) }
+        let up = panel.frame.offsetBy(dx: 0, dy: panel.frame.height + 10)
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.18
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().setFrame(up, display: true)
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [self] in panel.orderOut(nil) })
+    }
+
+    /// Grows or shrinks the sheet with its top edge pinned, so the header never moves.
+    func resize(to height: CGFloat, animated: Bool) {
+        let f = panel.frame
+        let target = NSRect(x: f.minX, y: f.maxY - height, width: width, height: height)
+        if animated { panel.animator().setFrame(target, display: true) } else { panel.setFrame(target, display: true) }
+    }
+
+    // MARK: Keys
+
+    private func installKeys() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            guard let self, self.onScreen else { return e }
+            if e.keyCode == 53 { self.dismiss(); return nil } // esc
+            if e.modifierFlags.contains(.command), e.charactersIgnoringModifiers == "q" {
+                NSApp.terminate(nil)
+                return nil
+            }
+            return self.handle(e) ? nil : e
+        }
+    }
+
+    private func removeKeys() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
+    }
+
+    /// Subclass hook for extra keys. Return true when the key was consumed.
+    func handle(_ event: NSEvent) -> Bool { false }
+
+    // MARK: Feedback
+
+    /// A short sideways shake: this page is cleared, here comes the next.
+    func shake(then: @escaping () -> Void) {
+        let base = panel.frame
+        let steps: [CGFloat] = [-7, 6, -4, 3, 0]
+        var i = 0
+        Timer.scheduledTimer(withTimeInterval: 0.045, repeats: true) { [self] t in
+            panel.setFrame(base.offsetBy(dx: steps[i], dy: 0), display: true)
+            i += 1
+            guard i == steps.count else { return }
+            t.invalidate()
+            then()
+        }
+    }
+
+    /// A single wash of colour over the whole sheet.
+    func flash(_ color: NSColor) {
+        let v = NSView(frame: body.bounds)
+        v.wantsLayer = true
+        v.layer?.backgroundColor = color.withAlphaComponent(0.26).cgColor
+        body.addSubview(v)
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.34
+            v.animator().alphaValue = 0
+        }, completionHandler: { v.removeFromSuperview() })
+    }
+
+    /// The closing exhale: green swells once and fades, then the sheet leaves.
+    func breatheOutAndClose() {
+        let v = NSView(frame: body.bounds)
+        v.wantsLayer = true
+        v.layer?.backgroundColor = dexGreen.withAlphaComponent(0).cgColor
+        body.addSubview(v)
+        let breath = CABasicAnimation(keyPath: "backgroundColor")
+        breath.fromValue = dexGreen.withAlphaComponent(0).cgColor
+        breath.toValue = dexGreen.withAlphaComponent(0.32).cgColor
+        breath.duration = 0.34
+        breath.autoreverses = true
+        breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        v.layer?.add(breath, forKey: "breath")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) { [self] in
+            v.removeFromSuperview()
+            dismiss()
+        }
+    }
+}
+
+// MARK: memcheck (M)
+
+/// Four hogs at a time, each with an End button on keys 1–4. Clear all four and the next four
+/// slide up from under; clear the last of them and the sheet breathes green and leaves.
+final class MemcheckPanel: ToolPanel {
+    private static let rowHeight: CGFloat = 28
+    private static let contentTop = ToolPanel.headerHeight + 20
+    private static let perPage = 4
+
+    private var remaining: [Proc]
+    private var page: [Proc] = []
+    private var buttons: [KeyButton] = []
+    private var ended: Set<Int> = []
+    private var turning = false
+    private let rowsHost = FlippedView()
+
+    init(hogs: [Proc]) {
+        remaining = hogs
+        super.init(kind: .memcheck, name: "memcheck", width: 430)
+
+        // Same size as the rows, or the monospaced columns would not line up under it.
+        let columns = panelLabel("   PID    %MEM      RSS     NAME", 11, panelDim)
+        columns.frame.origin = NSPoint(x: 86, y: ToolPanel.headerHeight + 3)
+        body.addSubview(columns)
+        body.addSubview(rowsHost)
+    }
+
+    func show(anchor: NSRect?) {
+        layoutPage()
+        present(height: height(for: page.count), anchor: anchor)
+    }
+
+    private func height(for rows: Int) -> CGFloat {
+        Self.contentTop + CGFloat(rows) * Self.rowHeight + 12
+    }
+
+    // MARK: Pages
+
+    private func layoutPage(slidingUp: Bool = false) {
+        page = Array(remaining.prefix(Self.perPage))
+        ended = []
+        rowsHost.subviews.forEach { $0.removeFromSuperview() }
+        buttons = []
+
+        for (i, p) in page.enumerated() {
+            let row = NSView(frame: NSRect(x: 0, y: CGFloat(i) * Self.rowHeight,
+                                           width: width, height: Self.rowHeight))
+            let button = KeyButton(cap: "\(i + 1)", word: "End", minWidth: 64,
+                                   target: self, action: #selector(endTapped(_:)))
+            button.tag = i
+            button.frame.origin = NSPoint(x: 14, y: 3)
+            button.breathe(delay: Double(i) * 0.18)
+            row.addSubview(button)
+            buttons.append(button)
+
+            let name = p.name.count > 22 ? p.name.prefix(21) + "\u{2026}" : p.name[...]
+            let text = panelLabel(String(format: "%6d  %5.1f%%  %7.0f MB  %@",
+                                         p.pid, p.mem, p.rssMB, String(name)), 11, panelInk)
+            text.frame.origin = NSPoint(x: 86, y: 7)
+            row.addSubview(text)
+            rowsHost.addSubview(row)
+        }
+
+        let rowsHeight = CGFloat(page.count) * Self.rowHeight
+        rowsHost.frame = NSRect(x: 0, y: Self.contentTop, width: width, height: rowsHeight)
+        guard slidingUp else { return }
+
+        rowsHost.frame.origin.y = Self.contentTop + rowsHeight
+        rowsHost.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { [self] ctx in
+            ctx.duration = 0.26
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            resize(to: height(for: page.count), animated: true)
+            rowsHost.animator().setFrameOrigin(NSPoint(x: 0, y: Self.contentTop))
+            rowsHost.animator().alphaValue = 1
+        }
+    }
+
+    // MARK: Ending
+
+    @objc private func endTapped(_ sender: NSButton) { end(at: sender.tag) }
+
+    override func handle(_ event: NSEvent) -> Bool {
+        guard let digit = Int(event.charactersIgnoringModifiers ?? ""), (1...Self.perPage).contains(digit) else {
+            return false
+        }
+        end(at: digit - 1)
+        return true
+    }
+
+    private func end(at i: Int) {
+        guard !turning, i < page.count, !ended.contains(i) else { return NSSound.beep() }
+        let target = page[i]
+        guard endProcess(target.pid) else {
+            flash(.systemRed)
+            return NSSound.beep()
+        }
+        ended.insert(i)
+        remaining.removeAll { $0.pid == target.pid }
+        buttons[i].spent = true
+        rowsHost.subviews[i].animator().alphaValue = 0.28
+        guard ended.count == page.count else { return }
+        turnPage()
+    }
+
+    private func turnPage() {
+        turning = true
+        shake { [self] in
+            flash(dexGreen)
+            guard !remaining.isEmpty else {
+                turning = false
+                return breatheOutAndClose()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
+                rowsHost.alphaValue = 1
+                layoutPage(slidingUp: true)
+                turning = false
+            }
+        }
+    }
+}
+
+// MARK: sweep (K)
+
+/// What went, as a dotted list of item-words and what each freed. Closes itself after five
+/// seconds — the count runs down in the corner — unless you hover or click, which hands the
+/// sheet back to esc.
+final class SweepPanel: ToolPanel {
+    private static let rowHeight: CGFloat = 28
+    private static let contentTop = ToolPanel.headerHeight + 10
+    private static let chipWidth: CGFloat = 84
+
+    private var secondsLeft = 5
+    private var countdown: Timer?
+
+    init(closed: [Slop], survived: [Slop]) {
+        super.init(kind: .sweep, name: "sweep", width: 430)
+
+        // One line per kind of leftover, not per process: "idle terminal 42 min" is one item-word.
+        var order: [String] = []
+        var freed: [String: Double] = [:]
+        var counts: [String: Int] = [:]
+        for s in closed {
+            let word = String(s.reason.prefix(while: { !$0.isNumber })).trimmingCharacters(in: .whitespaces)
+            if freed[word] == nil { order.append(word) }
+            freed[word, default: 0] += s.rssMB
+            counts[word, default: 0] += 1
+        }
+        if !survived.isEmpty {
+            order.append("survived")
+            freed["survived"] = survived.reduce(0) { $0 + $1.rssMB }
+            counts["survived"] = survived.count
+        }
+
+        let rows = FlippedView(frame: NSRect(x: 0, y: Self.contentTop, width: width,
+                                             height: CGFloat(order.count) * Self.rowHeight))
+        let textX = 14 + Self.chipWidth + 12
+        let listColumns = Int((width - textX - 14) / mono(10.5).maximumAdvancement.width)
+        for (i, word) in order.enumerated() {
+            let gone = word != "survived"
+            let top = CGFloat(i) * Self.rowHeight
+            let chip = capChip("\(counts[word] ?? 0)", gone ? "gone" : "left",
+                               width: Self.chipWidth, dim: !gone)
+            chip.frame.origin = NSPoint(x: 14, y: top + 4)
+            rows.addSubview(chip)
+            let line = panelLabel(dots(word, "\(Int(freed[word] ?? 0)) MB", columns: listColumns),
+                                  10.5, gone ? panelInk : panelDim)
+            line.frame.origin = NSPoint(x: textX, y: top + 8)
+            rows.addSubview(line)
+        }
+        body.addSubview(rows)
+
+        var y = Self.contentTop + rows.frame.height + 8
+        body.addSubview(hairline(NSRect(x: 14, y: y, width: width - 28, height: 1)))
+        y += 10
+
+        let totalColumns = Int((width - 28) / mono(11, bold: true).maximumAdvancement.width)
+        let total = panelLabel(dots("freed", "\(Int(closed.reduce(0) { $0 + $1.rssMB })) MB",
+                                    columns: totalColumns),
+                               11, dexGreen, bold: true)
+        total.frame.origin = NSPoint(x: 14, y: y)
+        body.addSubview(total)
+        sheetHeight = y + 20 + 12
+
+        body.onTouch = { [weak self] in self?.holdOpen() }
+    }
+
+    private var sheetHeight: CGFloat = 0
+
+    /// `word ·········· amount`, filling the row width. The font is monospaced, so counting
+    /// characters is the same as measuring.
+    private func dots(_ left: String, _ right: String, columns: Int) -> String {
+        let gap = max(2, columns - left.count - right.count - 2)
+        return left + " " + String(repeating: "·", count: gap) + " " + right
+    }
+
+    func show(anchor: NSRect?) {
+        present(height: sheetHeight, anchor: anchor)
+        tick()
+    }
+
+    /// Counts 5 down to 1 in the corner, then closes.
+    private func tick() {
+        note.stringValue = "esc to close · \(secondsLeft)"
+        placeNote()
+        countdown = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [self] t in
+            secondsLeft -= 1
+            guard secondsLeft > 0 else {
+                t.invalidate()
+                return dismiss()
+            }
+            note.stringValue = "esc to close · \(secondsLeft)"
+            placeNote()
+        }
+    }
+
+    /// Hovering or clicking means you are reading it: the timer stops for good, esc closes it.
+    private func holdOpen() {
+        guard countdown != nil else { return }
+        countdown?.invalidate()
+        countdown = nil
+        note.stringValue = "esc to close"
+        placeNote()
+    }
+
+    override func dismiss(animated: Bool) {
+        countdown?.invalidate()
+        countdown = nil
+        super.dismiss(animated: animated)
+    }
+}
+
+// MARK: dex (the menu bar dropdown)
+
+/// The dropdown itself, rebuilt as one of these sheets so it slides like the other two and
+/// carries the same key caps. Every control still calls the same actions the NSMenu called.
+final class DexPanel: ToolPanel {
+    /// One width for every key cap, so they line up and none of them jumps when its word changes.
+    private static let capWidth: CGFloat = 170
+
+    private let toggleKey: KeyButton
+    private let safeBox = NSButton(checkboxWithTitle: "Auto-Disable when", target: nil, action: nil)
+    private let batteryPill: NSButton
+    private let tempPill: NSButton
+    private let hotKeyRow = NSButton(title: "", target: nil, action: nil)
+    private(set) var sheetHeight: CGFloat = 0
+    private var pillOrigin: NSPoint = .zero
+    private weak var owner: Dex?
+
+    init(owner: Dex) {
+        let label = defaults.string(forKey: "label")!
+        let keys = String(label.dropLast())
+        self.owner = owner
+        toggleKey = KeyButton(cap: label, word: "Keep Awake", minWidth: DexPanel.capWidth, target: owner,
+                              action: #selector(Dex.toggleFromMenu))
+        batteryPill = pill("Battery at or below this (on battery). Click to change.", owner, #selector(Dex.editBattery))
+        tempPill = pill("Chip temperature at or above this. Click to change.", owner, #selector(Dex.editTemp))
+        super.init(kind: .dex, name: "dex", width: 400)
+        closeWhenClickedAway = true
+
+        var y = Self.headerHeight + 10
+
+        toggleKey.frame.origin = NSPoint(x: 14, y: y)
+        toggleKey.toolTip = "Click, or press \(label), to switch"
+        toggleKey.breathe(delay: 0)
+        body.addSubview(toggleKey)
+        y += 33
+        body.addSubview(hairline(NSRect(x: 14, y: y, width: width - 28, height: 1)))
+        y += 11
+
+        let safeTip = "Auto-Disable turns Dex off by itself when the chip gets too hot, or when the Mac is on battery "
+            + "and drops too low. Keeps a closed laptop from overheating or draining flat. Click the values to change them."
+        safeBox.target = owner
+        safeBox.action = #selector(Dex.toggleSafeMode)
+        safeBox.attributedTitle = NSAttributedString(string: "Auto-Disable when",
+                                                     attributes: [.font: mono(12), .foregroundColor: panelInk])
+        safeBox.toolTip = safeTip
+        safeBox.sizeToFit()
+        safeBox.frame.origin = NSPoint(x: 14, y: y)
+        body.addSubview(safeBox)
+        [batteryPill, tempPill].forEach(body.addSubview)
+        pillOrigin = NSPoint(x: safeBox.frame.maxX + 8, y: y - 1)
+        y += 30
+
+        hotKeyRow.target = owner
+        hotKeyRow.action = #selector(Dex.changeHotKey)
+        hotKeyRow.isBordered = false
+        hotKeyRow.setButtonType(.momentaryChange)
+        hotKeyRow.alignment = .left
+        hotKeyRow.frame = NSRect(x: 12, y: y, width: width - 24, height: 20)
+        body.addSubview(hotKeyRow)
+        y += 30
+        body.addSubview(hairline(NSRect(x: 14, y: y, width: width - 28, height: 1)))
+        y += 11
+
+        for (cap, word, action, tip) in [
+            (keys + "M", "memcheck", #selector(Dex.memcheckFromMenu),
+             "Your processes using 1% of RAM or more, four at a time. Press 1\u{2013}4 to end one; esc closes."),
+            (keys + "K", "sweep", #selector(Dex.sweepFromMenu),
+             "Closes leftovers from builds: dev servers, automation browsers, terminals idle 30+ minutes "
+                + "and orphaned build tools, then lists what it freed."),
+        ] {
+            let b = KeyButton(cap: cap, word: word, minWidth: Self.capWidth, target: owner, action: action)
+            b.frame.origin = NSPoint(x: 14, y: y)
+            b.toolTip = tip
+            body.addSubview(b)
+            y += 29
+        }
+        y += 4
+        body.addSubview(hairline(NSRect(x: 14, y: y, width: width - 28, height: 1)))
+        y += 10
+
+        let author = panelLabel("by Daniel Trifunovic", 12, panelDim)
+        author.frame.origin = NSPoint(x: 14, y: y + 3)
+        author.toolTip = "Malo periculosam libertatem quam quietum servitium"
+        body.addSubview(author)
+
+        let gh = NSImage(contentsOfFile: Bundle.main.path(forResource: "github", ofType: "png") ?? "")
+        gh?.size = NSSize(width: 14, height: 14)
+        gh?.isTemplate = true
+        let ghButton = linkButton("", image: gh, tip: "github.com/gigacook", owner, #selector(Dex.openGitHub))
+        ghButton.sizeToFit()
+        ghButton.frame.origin = NSPoint(x: author.frame.maxX + 10, y: y)
+        body.addSubview(ghButton)
+
+        let coffee = NSImage(systemSymbolName: "cup.and.saucer", accessibilityDescription: "Coffee")
+        let kofi = linkButton("Support Dex", image: coffee, tip: "Buy me a coffee on Ko-fi", owner,
+                              #selector(Dex.openKofi))
+        kofi.sizeToFit()
+        kofi.frame.origin = NSPoint(x: ghButton.frame.maxX + 8, y: y)
+        body.addSubview(kofi)
+        y += 30
+        body.addSubview(hairline(NSRect(x: 14, y: y, width: width - 28, height: 1)))
+        y += 10
+
+        let quit = NSButton(title: "", target: NSApp, action: #selector(NSApplication.terminate(_:)))
+        quit.isBordered = false
+        quit.setButtonType(.momentaryChange)
+        quit.alignment = .left
+        quit.attributedTitle = NSAttributedString(string: "⌧ Quit Dex",
+                                                  attributes: [.font: mono(12), .foregroundColor: panelInk])
+        quit.frame = NSRect(x: 12, y: y, width: 140, height: 20)
+        body.addSubview(quit)
+
+        let quitKey = panelLabel("⌘Q", 11, panelDim)
+        quitKey.frame.origin = NSPoint(x: width - 14 - quitKey.frame.width, y: y + 2)
+        body.addSubview(quitKey)
+        y += 30
+
+        sheetHeight = y + 4
+        sync()
+    }
+
+    func show(anchor: NSRect?) { present(height: sheetHeight, anchor: anchor) }
+
+    /// Pulls the live values back out of defaults — the sheet stays open while they change.
+    func sync() {
+        let awake = owner?.awake ?? false
+        title.attributedStringValue = NSAttributedString(
+            string: "dex", attributes: [.font: mono(15, bold: true), .foregroundColor: dexGreen])
+            + NSAttributedString(string: awake ? " — active" : " — inactive", attributes: [
+                .font: mono(15, bold: true), .foregroundColor: awake ? dexGreen : panelDim,
+            ])
+        title.sizeToFit()
+        toggleKey.setWord(awake ? "Let It Sleep" : "Keep Awake")
+
+        let safe = defaults.bool(forKey: "safeMode")
+        safeBox.state = safe ? .on : .off
+        batteryPill.title = "≤\(defaults.integer(forKey: "batteryMin"))%"
+        tempPill.title = "≥\(defaults.integer(forKey: "tempMax"))°C"
+        for pill in [batteryPill, tempPill] {
+            pill.isEnabled = safe
+            pill.sizeToFit()
+            pill.frame.size.width += 10
+        }
+        batteryPill.frame.origin = pillOrigin
+        tempPill.frame.origin = NSPoint(x: batteryPill.frame.maxX + 6, y: pillOrigin.y)
+        hotKeyRow.attributedTitle = NSAttributedString(
+            string: "Hot Key: \(defaults.string(forKey: "label")!)  (click to change)",
+            attributes: [.font: mono(12), .foregroundColor: panelInk])
+    }
+}
+
 // MARK: - App
 
 final class Dex: NSObject, NSApplicationDelegate {
     var item = makeStatusItem(nearClock: false)
-    let stateItem = NSMenuItem(title: "", action: #selector(toggleFromMenu), keyEquivalent: "")
-    let hotKeyItem = NSMenuItem(title: "", action: #selector(changeHotKey), keyEquivalent: "")
-    let safeBox = NSButton(checkboxWithTitle: "Auto-Disable when", target: nil, action: #selector(toggleSafeMode))
-    lazy var batteryPill = pill("Battery at or below this (on battery). Click to change.", self, #selector(editBattery))
-    lazy var tempPill = pill("Chip temperature at or above this. Click to change.", self, #selector(editTemp))
-    let memItem = NSMenuItem(title: "", action: #selector(memcheckFromMenu), keyEquivalent: "")
-    let sweepItem = NSMenuItem(title: "", action: #selector(sweepFromMenu), keyEquivalent: "")
     var awake = false
+    /// The one sheet on screen, if any: the dropdown, memcheck or sweep.
+    var sheet: ToolPanel?
     var safeTimer: Timer?
+    /// When a click outside last closed a sheet, so the status item can ignore that same click.
+    var lastClickAway = Date.distantPast
     var lastRescue = Date.distantPast
 
     func applicationDidFinishLaunching(_: Notification) {
         _ = setSleepDisabled(false) // clear any leftover state from a crash
         if SMAppService.mainApp.status != .enabled { try? SMAppService.mainApp.register() }
-        defaults.register(defaults: ["code": 2, "mods": Int(controlKey | optionKey), "label": "⌃⌥D",
+        defaults.register(defaults: ["code": 2, "mods": Int(controlKey | optionKey), "label": "\u{2303}\u{2325}D",
                                      "safeMode": true, "batteryMin": 15, "tempMax": 80])
-
-        let safeTip = "Auto-Disable turns Dex off by itself when the chip gets too hot, or when the Mac is on battery "
-            + "and drops too low. Keeps a closed laptop from overheating or draining flat. Click the values to change them."
-        safeBox.target = self
-        safeBox.font = mono()
-        safeBox.toolTip = safeTip
-
-        let menu = NSMenu()
-        stateItem.target = self
-        stateItem.toolTip = "Click or press the hotkey to switch"
-        menu.addItem(stateItem)
-        menu.addItem(.separator())
-        menu.addItem(rowItem([safeBox, batteryPill, tempPill], tip: safeTip))
-        hotKeyItem.target = self
-        menu.addItem(hotKeyItem)
-        menu.addItem(.separator())
-        memItem.target = self
-        memItem.toolTip = "Processes using 1% of RAM or more, newest reading, with the option to end one."
-        menu.addItem(memItem)
-        sweepItem.target = self
-        sweepItem.toolTip = "Closes leftovers from builds: dev servers, automation browsers, terminals idle 30+ minutes "
-            + "and orphaned build tools. Your apps, browsers and busy terminals are left alone."
-        menu.addItem(sweepItem)
-        menu.addItem(.separator())
-        let gh = NSImage(contentsOfFile: Bundle.main.path(forResource: "github", ofType: "png") ?? "")
-        gh?.size = NSSize(width: 14, height: 14)
-        gh?.isTemplate = true
-        let coffee = NSImage(systemSymbolName: "cup.and.saucer", accessibilityDescription: "Coffee")
-        let author = NSTextField(labelWithString: "by Daniel Trifunovic")
-        author.font = mono(12)
-        author.textColor = .secondaryLabelColor
-        menu.addItem(rowItem([
-            author,
-            linkButton("", image: gh, tip: "github.com/gigacook", self, #selector(openGitHub)),
-            linkButton("Support Dex", image: coffee, tip: "Buy me a coffee on Ko-fi", self, #selector(openKofi)),
-        ], tip: "Malo periculosam libertatem quam quietum servitium"))
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "", action: #selector(NSApp.terminate), keyEquivalent: "q")
-        quit.attributedTitle = NSAttributedString(string: "Quit Dex", attributes: [.font: mono()])
-        menu.addItem(quit)
-        item.menu = menu
+        armStatusItem()
         watchPlacement()
 
         onHotKey = { [weak self] id in
             switch id {
-            case 2: self?.showMemcheck()
-            case 3: self?.sweepSlop()
+            case 2: self?.show(.memcheck)
+            case 3: self?.show(.sweep)
             default: self?.toggle()
             }
         }
@@ -570,10 +1248,9 @@ final class Dex: NSObject, NSApplicationDelegate {
     func rescueIfHidden() {
         guard isHidden(item), Date().timeIntervalSince(lastRescue) > 300 else { return }
         lastRescue = Date()
-        let menu = item.menu
         NSStatusBar.system.removeStatusItem(item)
         item = makeStatusItem(nearClock: true)
-        item.menu = menu
+        armStatusItem()
         refresh()
         NSLog("Dex: menu bar icon was hidden (notch or full menu bar), moved it next to the system icons")
     }
@@ -585,22 +1262,43 @@ final class Dex: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_: Notification) { _ = setSleepDisabled(false) }
 
+    /// The dropdown is a sheet now, so the status item carries an action instead of a menu.
+    func armStatusItem() {
+        item.button?.target = self
+        item.button?.action = #selector(statusClicked)
+    }
+
+    @objc func statusClicked() {
+        // The click that closes an open sheet also lands on the button; without this the sheet
+        // would shut and immediately reopen.
+        guard Date().timeIntervalSince(lastClickAway) > 0.3 else { return lastClickAway = .distantPast }
+        show(.dex)
+    }
+
+    /// One sheet at a time. The same hotkey again puts it away; a different one swaps it out,
+    /// and closing that leaves nothing behind.
+    func show(_ kind: ToolPanel.Kind) {
+        let showing = sheet?.onScreen == true ? sheet?.kind : nil
+        sheet?.dismiss(animated: showing == kind)
+        sheet = nil
+        guard showing != kind else { return }
+        switch kind {
+        case .dex:
+            let panel = DexPanel(owner: self)
+            panel.onClickedAway = { [weak self] in self?.lastClickAway = Date() }
+            sheet = panel
+            panel.show(anchor: item.button?.window?.frame)
+        case .memcheck: showMemcheck()
+        case .sweep: sweepSlop()
+        }
+    }
+
     func refresh() {
         item.button?.image = icon(running: awake)
-        stateItem.attributedTitle = NSAttributedString(string: "DEX — ", attributes: [.font: mono(13, bold: true)])
-            + NSAttributedString(string: awake ? "ACTIVE" : "INACTIVE", attributes: [
-                .font: mono(13, bold: true), .foregroundColor: awake ? NSColor.systemGreen : NSColor.secondaryLabelColor,
-            ])
-        let safe = defaults.bool(forKey: "safeMode")
-        safeBox.state = safe ? .on : .off
-        batteryPill.title = "≤\(defaults.integer(forKey: "batteryMin"))%"
-        tempPill.title = "≥\(defaults.integer(forKey: "tempMax"))°C"
-        [batteryPill, tempPill].forEach { $0.isEnabled = safe }
-        hotKeyItem.attributedTitle = NSAttributedString(
-            string: "Hot Key: \(defaults.string(forKey: "label")!)  (click to change)", attributes: [.font: mono()])
+        (sheet as? DexPanel)?.sync()
 
         // Check every 30 s while keeping the Mac awake with Auto-Disable on
-        let watch = awake && safe
+        let watch = awake && defaults.bool(forKey: "safeMode")
         if watch, safeTimer == nil {
             safeTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.safetyCheck() }
         } else if !watch {
@@ -622,6 +1320,7 @@ final class Dex: NSObject, NSApplicationDelegate {
     }
 
     func toggle() {
+        if sheet is DexPanel { sheet?.dismiss(); sheet = nil }
         guard !awake else { _ = setAwake(false); return }
         if defaults.bool(forKey: "safeMode"), let reason = unsafeReason() {
             return alert("Dex can't turn on right now", "Auto-Disable is on and \(reason).")
@@ -632,9 +1331,11 @@ final class Dex: NSObject, NSApplicationDelegate {
         _ = setAwake(true)
     }
 
-    /// Controls inside menu rows: close the menu first so dialogs don't fight menu tracking.
+    /// Controls inside the sheets: put the sheet away first. It floats at status bar level, so
+    /// anything it opens would otherwise end up behind it.
     func afterMenu(_ work: @escaping () -> Void) {
-        item.menu?.cancelTracking()
+        sheet?.dismiss()
+        sheet = nil
         DispatchQueue.main.async(execute: work)
     }
 
@@ -682,52 +1383,21 @@ final class Dex: NSObject, NSApplicationDelegate {
         let mods = UInt32(defaults.integer(forKey: "mods"))
         _ = registerHotKey(46, mods, id: 2) // M
         _ = registerHotKey(40, mods, id: 3) // K
-        let label = defaults.string(forKey: "label")!.dropLast()
-        memItem.attributedTitle = NSAttributedString(string: "Memory Hogs    \(label)M", attributes: [.font: mono()])
-        sweepItem.attributedTitle = NSAttributedString(string: "Sweep Build Slop    \(label)K", attributes: [.font: mono()])
     }
 
-    @objc func memcheckFromMenu() { afterMenu { self.showMemcheck() } }
-    @objc func sweepFromMenu() { afterMenu { self.sweepSlop() } }
+    @objc func memcheckFromMenu() { afterMenu { self.show(.memcheck) } }
+    @objc func sweepFromMenu() { afterMenu { self.show(.sweep) } }
 
-    /// memcheck: what is eating RAM, with the option to end one.
+    /// memcheck: what is eating RAM, four at a time, each endable with its own number key.
     func showMemcheck() {
-        let rows = Array(memoryHogs().prefix(12))
-        guard !rows.isEmpty else { return alert("Nothing is hogging RAM", "No process is using 1% or more.") }
-        let list = rows.map {
-            String(format: "%-7d %5.1f%% %8.0f MB  %@", $0.pid, $0.mem, $0.rssMB, String($0.name.prefix(28)))
-        }.joined(separator: "\n")
-        let a = NSAlert()
-        a.messageText = "Memory hogs"
-        a.informativeText = "Using 1% of RAM or more, biggest first."
-        let text = NSTextField(labelWithString: "    PID   %MEM      RSS  NAME\n" + list)
-        text.font = mono(11)
-        text.frame.size = text.fittingSize
-        a.accessoryView = text
-        a.addButton(withTitle: "End a Process…")
-        a.addButton(withTitle: "Close")
-        NSApp.activate(ignoringOtherApps: true)
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-
-        let ask = NSAlert()
-        ask.messageText = "End which process?"
-        ask.informativeText = "Type its PID. It is asked to quit first, then forced if it ignores that."
-        let field = NSTextField(string: String(rows[0].pid))
-        field.font = mono()
-        field.frame = NSRect(x: 0, y: 0, width: 90, height: 24)
-        ask.accessoryView = field
-        ask.window.initialFirstResponder = field
-        ask.addButton(withTitle: "End")
-        ask.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        guard ask.runModal() == .alertFirstButtonReturn,
-              let pid = Int32(field.stringValue.trimmingCharacters(in: .whitespaces)),
-              let row = rows.first(where: { $0.pid == pid }) else { return NSSound.beep() }
-        alert(endProcess(pid) ? "Ended \(row.name)" : "Couldn't end \(row.name)",
-              endProcess(pid) ? "" : "It may need admin rights, or it is already gone.")
+        let hogs = Array(endableHogs().prefix(12))
+        guard !hogs.isEmpty else { return alert("Nothing is hogging RAM", "No process is using 1% or more.") }
+        let panel = MemcheckPanel(hogs: hogs)
+        sheet = panel
+        panel.show(anchor: item.button?.window?.frame)
     }
 
-    /// Closes build leftovers and says what went.
+    /// Closes build leftovers and says what went, by kind.
     func sweepSlop() {
         let targets = buildSlop()
         guard !targets.isEmpty else {
@@ -737,21 +1407,9 @@ final class Dex: NSObject, NSApplicationDelegate {
         for t in targets {
             if endProcess(t.pid, hangup: t.reason.hasPrefix("idle terminal")) { closed.append(t) } else { left.append(t) }
         }
-        let lines = (closed + left).map { t -> String in
-            let survived = left.contains { $0.pid == t.pid }
-            return String(format: "%-7d %-22@ %6.0f MB  %@", t.pid, t.name as NSString, t.rssMB,
-                          survived ? t.reason + " (survived)" : t.reason)
-        }.joined(separator: "\n")
-        let freed = closed.reduce(0.0) { $0 + $1.rssMB }
-        let a = NSAlert()
-        a.messageText = "Closed \(closed.count), freed \(Int(freed)) MB"
-        a.informativeText = "Swept dev servers, automation browsers, idle terminals and orphaned build tools."
-        let text = NSTextField(labelWithString: lines)
-        text.font = mono(11)
-        text.frame.size = text.fittingSize
-        a.accessoryView = text
-        NSApp.activate(ignoringOtherApps: true)
-        a.runModal()
+        let panel = SweepPanel(closed: closed, survived: left)
+        sheet = panel
+        panel.show(anchor: item.button?.window?.frame)
     }
 
     @objc func openGitHub() { afterMenu { NSWorkspace.shared.open(URL(string: "https://www.github.com/gigacook")!) } }
